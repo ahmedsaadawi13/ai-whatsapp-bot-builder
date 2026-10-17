@@ -24,7 +24,8 @@ class Contact extends Model {
         if ($contact) {
             // Update last contact time
             $this->update($contact['id'], ['last_contact_at' => date('Y-m-d H:i:s')], $tenantId);
-            return $contact;
+            // Return fresh data after update
+            return $this->find($contact['id'], $tenantId);
         }
 
         // Create new contact

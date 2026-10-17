@@ -10,6 +10,7 @@ class Auth {
 
     private $session;
     private $userModel;
+    private $cachedUser = null;
 
     public function __construct() {
         $this->session = new Session();
@@ -71,7 +72,7 @@ class Auth {
     }
 
     /**
-     * Get authenticated user
+     * Get authenticated user (cached within request)
      *
      * @return array|null
      */
@@ -80,13 +81,19 @@ class Auth {
             return null;
         }
 
+        // Return cached user if available in this request
+        if ($this->cachedUser !== null) {
+            return $this->cachedUser;
+        }
+
         $user = $this->session->get('user');
 
-        // Refresh user data from database
+        // Refresh user data from database once per request
         if ($user) {
             $freshUser = $this->userModel->find($user['id']);
             if ($freshUser) {
                 $this->session->set('user', $freshUser);
+                $this->cachedUser = $freshUser;
                 return $freshUser;
             }
         }

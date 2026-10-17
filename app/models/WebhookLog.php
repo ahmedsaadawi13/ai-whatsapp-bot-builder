@@ -28,11 +28,50 @@ class WebhookLog extends Model {
     }
 
     /**
+     * Override find to enforce tenant isolation via webhook
+     *
+     * @param int $id
+     * @param int|null $tenantId
+     * @return array|null
+     */
+    public function find($id, $tenantId = null) {
+        if ($tenantId === null) {
+            return parent::find($id, null);
+        }
+
+        $sql = "SELECT wl.* FROM {$this->table} wl
+                JOIN webhooks w ON wl.webhook_id = w.id
+                WHERE wl.id = ? AND w.tenant_id = ?
+                LIMIT 1";
+        $stmt = $this->query($sql, [$id, $tenantId]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Override delete to enforce tenant isolation via webhook
+     *
+     * @param int $id
+     * @param int|null $tenantId
+     * @return bool
+     */
+    public function delete($id, $tenantId = null) {
+        if ($tenantId === null) {
+            return parent::delete($id, null);
+        }
+
+        $sql = "DELETE wl FROM {$this->table} wl
+                JOIN webhooks w ON wl.webhook_id = w.id
+                WHERE wl.id = ? AND w.tenant_id = ?";
+        $stmt = $this->query($sql, [$id, $tenantId]);
+        return $stmt->rowCount() > 0;
+    }
+
+    /**
      * Check if table has tenant_id column
      *
      * @return bool
      */
     protected function hasTenantId() {
-        return false; // WebhookLog doesn't have tenant_id
+        return false; // WebhookLog doesn't have tenant_id but enforces via JOIN
     }
 }

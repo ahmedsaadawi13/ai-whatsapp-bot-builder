@@ -65,11 +65,31 @@ class BroadcastMessage extends Model {
     }
 
     /**
+     * Override delete to enforce tenant isolation via broadcast
+     *
+     * @param int $id
+     * @param int|null $tenantId
+     * @return bool
+     */
+    public function delete($id, $tenantId = null) {
+        if ($tenantId === null) {
+            return parent::delete($id, null);
+        }
+
+        // Verify broadcast belongs to tenant before deleting message
+        $sql = "DELETE bm FROM {$this->table} bm
+                JOIN broadcasts b ON bm.broadcast_id = b.id
+                WHERE bm.id = ? AND b.tenant_id = ?";
+        $stmt = $this->query($sql, [$id, $tenantId]);
+        return $stmt->rowCount() > 0;
+    }
+
+    /**
      * Check if table has tenant_id column
      *
      * @return bool
      */
     protected function hasTenantId() {
-        return false; // BroadcastMessage doesn't have tenant_id directly
+        return false; // BroadcastMessage doesn't have tenant_id directly but enforces via JOIN
     }
 }

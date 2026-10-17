@@ -81,6 +81,17 @@ class BotEngine {
         foreach ($steps as $step) {
             $config = json_decode($step['action_config'], true);
 
+            // Validate JSON decode succeeded
+            if ($config === null && $step['action_config'] !== 'null') {
+                error_log("Invalid JSON in flow step {$step['id']}: {$step['action_config']}");
+                continue; // Skip malformed step
+            }
+
+            // Ensure config is an array
+            if (!is_array($config)) {
+                $config = [];
+            }
+
             switch ($step['action_type']) {
                 case 'send_text':
                     $replies[] = [

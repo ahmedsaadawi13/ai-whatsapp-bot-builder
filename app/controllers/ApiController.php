@@ -132,8 +132,12 @@ class ApiController extends Controller {
             $this->json(['error' => 'Invalid JSON payload'], 400);
         }
 
-        // Validate webhook signature/token (simplified)
+        // Require webhook token for authentication
         $token = isset($_SERVER['HTTP_X_WEBHOOK_TOKEN']) ? $_SERVER['HTTP_X_WEBHOOK_TOKEN'] : null;
+
+        if (!$token) {
+            $this->json(['error' => 'Missing webhook token'], 401);
+        }
 
         // Find channel by phone number and verify token
         if (empty($data['to_phone']) || empty($data['from_phone']) || empty($data['message'])) {
@@ -143,19 +147,19 @@ class ApiController extends Controller {
         require_once __DIR__ . '/../models/Channel.php';
         $channelModel = new Channel();
 
-        // Find channel by phone number (simplified - in production would verify token)
+        // Find channel by phone number and verify token
         $db = Database::getInstance()->getConnection();
         $sql = "SELECT c.*, b.id as bot_id, b.tenant_id
                 FROM channels c
                 LEFT JOIN bots b ON c.id = b.channel_id AND b.status = 'active'
-                WHERE c.phone_number = ? AND c.status = 'active'
+                WHERE c.phone_number = ? AND c.webhook_verify_token = ? AND c.status = 'active'
                 LIMIT 1";
         $stmt = $db->prepare($sql);
-        $stmt->execute([$data['to_phone']]);
+        $stmt->execute([$data['to_phone'], $token]);
         $channel = $stmt->fetch();
 
         if (!$channel || !$channel['bot_id']) {
-            $this->json(['error' => 'Channel or bot not found'], 404);
+            $this->json(['error' => 'Invalid webhook token or channel not found'], 401);
         }
 
         $tenantId = $channel['tenant_id'];

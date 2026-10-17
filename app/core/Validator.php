@@ -137,6 +137,11 @@ class Validator {
      * @return bool
      */
     private function checkUnique($table, $column, $value, $exceptId = null) {
+        // Validate table and column names to prevent SQL injection
+        if (!$this->isValidIdentifier($table) || !$this->isValidIdentifier($column)) {
+            throw new Exception('Invalid table or column name in unique validation');
+        }
+
         $db = Database::getInstance()->getConnection();
 
         $sql = "SELECT COUNT(*) as count FROM {$table} WHERE {$column} = ?";
@@ -152,6 +157,16 @@ class Validator {
         $result = $stmt->fetch();
 
         return $result['count'] > 0;
+    }
+
+    /**
+     * Validate SQL identifier (table/column name)
+     *
+     * @param string $identifier
+     * @return bool
+     */
+    private function isValidIdentifier($identifier) {
+        return preg_match('/^[a-zA-Z0-9_]+$/', $identifier) === 1;
     }
 
     /**

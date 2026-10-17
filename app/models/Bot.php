@@ -52,19 +52,24 @@ class Bot extends Model {
     }
 
     /**
-     * Toggle bot status
+     * Toggle bot status (atomic operation to prevent race conditions)
      *
      * @param int $id
      * @param int $tenantId
      * @return bool
      */
     public function toggleStatus($id, $tenantId) {
-        $bot = $this->find($id, $tenantId);
-        if (!$bot) {
-            return false;
-        }
+        // Atomic toggle using CASE statement to prevent race conditions
+        $sql = "UPDATE {$this->table}
+                SET status = CASE
+                    WHEN status = 'active' THEN 'paused'
+                    WHEN status = 'paused' THEN 'active'
+                    ELSE status
+                END,
+                updated_at = NOW()
+                WHERE id = ? AND tenant_id = ?";
 
-        $newStatus = ($bot['status'] === 'active') ? 'paused' : 'active';
-        return $this->update($id, ['status' => $newStatus], $tenantId);
+        $stmt = $this->query($sql, [$id, $tenantId]);
+        return $stmt->rowCount() > 0;
     }
 }

@@ -58,6 +58,10 @@ class Model {
 
         foreach ($filters as $key => $value) {
             if ($value !== null) {
+                // Whitelist allowed column names to prevent SQL injection
+                if (!$this->isValidColumn($key)) {
+                    throw new Exception("Invalid filter column: {$key}");
+                }
                 $sql .= " AND {$key} = ?";
                 $params[] = $value;
             }
@@ -90,6 +94,10 @@ class Model {
 
         foreach ($filters as $key => $value) {
             if ($value !== null) {
+                // Whitelist allowed column names to prevent SQL injection
+                if (!$this->isValidColumn($key)) {
+                    throw new Exception("Invalid filter column: {$key}");
+                }
                 $sql .= " AND {$key} = ?";
                 $params[] = $value;
             }
@@ -198,6 +206,17 @@ class Model {
         // Tables without tenant_id: tenants, plans, platform admin users
         $nonTenantTables = ['tenants', 'plans'];
         return !in_array($this->table, $nonTenantTables);
+    }
+
+    /**
+     * Validate column name to prevent SQL injection
+     *
+     * @param string $columnName
+     * @return bool
+     */
+    protected function isValidColumn($columnName) {
+        // Only allow alphanumeric characters and underscores
+        return preg_match('/^[a-zA-Z0-9_]+$/', $columnName) === 1;
     }
 
     /**

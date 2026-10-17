@@ -156,7 +156,7 @@ class Request {
     }
 
     /**
-     * Clean input data (basic sanitization)
+     * Clean input data (sanitization and trimming)
      *
      * @param mixed $data
      * @return mixed
@@ -165,6 +165,23 @@ class Request {
         if (is_array($data)) {
             return array_map([$this, 'clean'], $data);
         }
-        return trim($data);
+
+        // Trim whitespace
+        $data = trim($data);
+
+        // Remove null bytes (security measure)
+        $data = str_replace("\0", '', $data);
+
+        return $data;
+    }
+
+    /**
+     * Sanitize input for HTML output (use in views)
+     *
+     * @param string $data
+     * @return string
+     */
+    public static function escape($data) {
+        return htmlspecialchars($data, ENT_QUOTES, 'UTF-8');
     }
 }
