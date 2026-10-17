@@ -11,20 +11,28 @@ class BroadcastMessage extends Model {
     protected $table = 'broadcast_messages';
 
     /**
-     * Get messages by broadcast
+     * Get messages by broadcast (with optional tenant isolation)
      *
      * @param int $broadcastId
      * @param string|null $status
      * @param int $limit
      * @param int $offset
+     * @param int|null $tenantId Optional tenant ID for isolation
      * @return array
      */
-    public function getByBroadcast($broadcastId, $status = null, $limit = 100, $offset = 0) {
+    public function getByBroadcast($broadcastId, $status = null, $limit = 100, $offset = 0, $tenantId = null) {
         $sql = "SELECT bm.*, c.name as contact_name, c.phone_number
                 FROM {$this->table} bm
-                JOIN contacts c ON bm.contact_id = c.id
-                WHERE bm.broadcast_id = ?";
-        $params = [$broadcastId];
+                JOIN contacts c ON bm.contact_id = c.id";
+
+        if ($tenantId !== null) {
+            $sql .= " JOIN broadcasts b ON bm.broadcast_id = b.id
+                      WHERE bm.broadcast_id = ? AND b.tenant_id = ?";
+            $params = [$broadcastId, $tenantId];
+        } else {
+            $sql .= " WHERE bm.broadcast_id = ?";
+            $params = [$broadcastId];
+        }
 
         if ($status !== null) {
             $sql .= " AND bm.status = ?";
@@ -32,35 +40,55 @@ class BroadcastMessage extends Model {
         }
 
         $sql .= " ORDER BY bm.id DESC LIMIT ? OFFSET ?";
-        $params[] = $limit;
-        $params[] = $offset;
+        $params[] = (int)$limit;
+        $params[] = (int)$offset;
 
         $stmt = $this->query($sql, $params);
         return $stmt->fetchAll();
     }
 
     /**
-     * Mark as sent
+     * Mark as sent (with optional tenant verification)
      *
      * @param int $id
+     * @param int|null $tenantId Optional tenant ID for isolation
      * @return bool
      */
-    public function markAsSent($id) {
-        $sql = "UPDATE {$this->table} SET status = 'sent', sent_at = NOW() WHERE id = ?";
-        $stmt = $this->query($sql, [$id]);
+    public function markAsSent($id, $tenantId = null) {
+        if ($tenantId !== null) {
+            // Verify via JOIN before updating
+            $sql = "UPDATE {$this->table} bm
+                    JOIN broadcasts b ON bm.broadcast_id = b.id
+                    SET bm.status = 'sent', bm.sent_at = NOW()
+                    WHERE bm.id = ? AND b.tenant_id = ?";
+            $stmt = $this->query($sql, [$id, $tenantId]);
+        } else {
+            $sql = "UPDATE {$this->table} SET status = 'sent', sent_at = NOW() WHERE id = ?";
+            $stmt = $this->query($sql, [$id]);
+        }
         return $stmt->rowCount() > 0;
     }
 
     /**
-     * Mark as failed
+     * Mark as failed (with optional tenant verification)
      *
      * @param int $id
      * @param string $errorMessage
+     * @param int|null $tenantId Optional tenant ID for isolation
      * @return bool
      */
-    public function markAsFailed($id, $errorMessage) {
-        $sql = "UPDATE {$this->table} SET status = 'failed', error_message = ? WHERE id = ?";
-        $stmt = $this->query($sql, [$errorMessage, $id]);
+    public function markAsFailed($id, $errorMessage, $tenantId = null) {
+        if ($tenantId !== null) {
+            // Verify via JOIN before updating
+            $sql = "UPDATE {$this->table} bm
+                    JOIN broadcasts b ON bm.broadcast_id = b.id
+                    SET bm.status = 'failed', bm.error_message = ?
+                    WHERE bm.id = ? AND b.tenant_id = ?";
+            $stmt = $this->query($sql, [$errorMessage, $id, $tenantId]);
+        } else {
+            $sql = "UPDATE {$this->table} SET status = 'failed', error_message = ? WHERE id = ?";
+            $stmt = $this->query($sql, [$errorMessage, $id]);
+        }
         return $stmt->rowCount() > 0;
     }
 
@@ -111,8 +139,8 @@ class BroadcastMessage extends Model {
         }
 
         $sql .= " ORDER BY bm.id DESC LIMIT ? OFFSET ?";
-        $params[] = $limit;
-        $params[] = $offset;
+        $params[] = (int)$limit;
+        $params[] = (int)$offset;
 
         $stmt = $this->query($sql, $params);
         return $stmt->fetchAll();
@@ -145,6 +173,41 @@ class BroadcastMessage extends Model {
         $stmt = $this->query($sql, $params);
         $result = $stmt->fetch();
         return (int) $result['total'];
+    }
+
+    /**
+     * Override update to enforce tenant isolation via broadcast
+     *
+     * @param int $id
+     * @param array $data
+     * @param int|null $tenantId
+     * @return bool
+     */
+    public function update($id, $data, $tenantId = null) {
+        if ($tenantId === null) {
+            return parent::update($id, $data, null);
+        }
+
+        $data['updated_at'] = date('Y-m-d H:i:s');
+
+        $sets = [];
+        $params = [];
+
+        foreach ($data as $key => $value) {
+            $sets[] = "{$key} = ?";
+            $params[] = $value;
+        }
+
+        // Verify broadcast belongs to tenant before updating
+        $sql = "UPDATE {$this->table} bm
+                JOIN broadcasts b ON bm.broadcast_id = b.id
+                SET " . implode(', ', $sets) . "
+                WHERE bm.id = ? AND b.tenant_id = ?";
+        $params[] = $id;
+        $params[] = $tenantId;
+
+        $stmt = $this->query($sql, $params);
+        return $stmt->rowCount() > 0;
     }
 
     /**

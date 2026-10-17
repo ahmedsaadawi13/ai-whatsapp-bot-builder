@@ -11,19 +11,31 @@ class WebhookLog extends Model {
     protected $table = 'webhook_logs';
 
     /**
-     * Get logs by webhook
+     * Get logs by webhook (with optional tenant isolation)
      *
      * @param int $webhookId
      * @param int $limit
      * @param int $offset
+     * @param int|null $tenantId Optional tenant ID for isolation
      * @return array
      */
-    public function getByWebhook($webhookId, $limit = 100, $offset = 0) {
-        $sql = "SELECT * FROM {$this->table}
-                WHERE webhook_id = ?
-                ORDER BY id DESC
-                LIMIT ? OFFSET ?";
-        $stmt = $this->query($sql, [$webhookId, $limit, $offset]);
+    public function getByWebhook($webhookId, $limit = 100, $offset = 0, $tenantId = null) {
+        if ($tenantId === null) {
+            // No tenant filtering (backward compatibility)
+            $sql = "SELECT * FROM {$this->table}
+                    WHERE webhook_id = ?
+                    ORDER BY id DESC
+                    LIMIT ? OFFSET ?";
+            $stmt = $this->query($sql, [$webhookId, (int)$limit, (int)$offset]);
+        } else {
+            // Enforce tenant isolation via JOIN
+            $sql = "SELECT wl.* FROM {$this->table} wl
+                    JOIN webhooks w ON wl.webhook_id = w.id
+                    WHERE wl.webhook_id = ? AND w.tenant_id = ?
+                    ORDER BY wl.id DESC
+                    LIMIT ? OFFSET ?";
+            $stmt = $this->query($sql, [$webhookId, $tenantId, (int)$limit, (int)$offset]);
+        }
         return $stmt->fetchAll();
     }
 
@@ -74,8 +86,8 @@ class WebhookLog extends Model {
         }
 
         $sql .= " ORDER BY wl.id DESC LIMIT ? OFFSET ?";
-        $params[] = $limit;
-        $params[] = $offset;
+        $params[] = (int)$limit;
+        $params[] = (int)$offset;
 
         $stmt = $this->query($sql, $params);
         return $stmt->fetchAll();
@@ -108,6 +120,41 @@ class WebhookLog extends Model {
         $stmt = $this->query($sql, $params);
         $result = $stmt->fetch();
         return (int) $result['total'];
+    }
+
+    /**
+     * Override update to enforce tenant isolation via webhook
+     *
+     * @param int $id
+     * @param array $data
+     * @param int|null $tenantId
+     * @return bool
+     */
+    public function update($id, $data, $tenantId = null) {
+        if ($tenantId === null) {
+            return parent::update($id, $data, null);
+        }
+
+        $data['updated_at'] = date('Y-m-d H:i:s');
+
+        $sets = [];
+        $params = [];
+
+        foreach ($data as $key => $value) {
+            $sets[] = "wl.{$key} = ?";
+            $params[] = $value;
+        }
+
+        // Verify webhook belongs to tenant before updating
+        $sql = "UPDATE {$this->table} wl
+                JOIN webhooks w ON wl.webhook_id = w.id
+                SET " . implode(', ', $sets) . "
+                WHERE wl.id = ? AND w.tenant_id = ?";
+        $params[] = $id;
+        $params[] = $tenantId;
+
+        $stmt = $this->query($sql, $params);
+        return $stmt->rowCount() > 0;
     }
 
     /**

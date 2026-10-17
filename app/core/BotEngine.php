@@ -107,13 +107,17 @@ class BotEngine {
                     break;
 
                 case 'send_media':
-                    $replies[] = [
-                        'type' => 'media',
-                        'content' => $config['caption'] ?? '',
-                        'media_url' => $config['media_url'] ?? '',
-                        'triggered_by' => 'flow',
-                        'flow_id' => $flow['id']
-                    ];
+                    if (isset($config['media_url']) && !empty($config['media_url'])) {
+                        $replies[] = [
+                            'type' => 'media',
+                            'content' => $config['caption'] ?? '',
+                            'media_url' => $config['media_url'],
+                            'triggered_by' => 'flow',
+                            'flow_id' => $flow['id']
+                        ];
+                    } else {
+                        error_log("Missing or empty 'media_url' in send_media config for step {$step['id']}");
+                    }
                     break;
 
                 case 'ask_question':
