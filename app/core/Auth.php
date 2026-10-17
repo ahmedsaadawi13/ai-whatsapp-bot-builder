@@ -95,6 +95,10 @@ class Auth {
                 $this->session->set('user', $freshUser);
                 $this->cachedUser = $freshUser;
                 return $freshUser;
+            } else {
+                // User was deleted - clean up session
+                $this->logout();
+                return null;
             }
         }
 

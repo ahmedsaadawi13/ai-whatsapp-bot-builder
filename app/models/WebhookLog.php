@@ -48,6 +48,69 @@ class WebhookLog extends Model {
     }
 
     /**
+     * Override findAll to enforce tenant isolation via webhook
+     *
+     * @param array $filters
+     * @param int|null $tenantId
+     * @param int $limit
+     * @param int $offset
+     * @return array
+     */
+    public function findAll($filters = [], $tenantId = null, $limit = 100, $offset = 0) {
+        if ($tenantId === null) {
+            return parent::findAll($filters, null, $limit, $offset);
+        }
+
+        $sql = "SELECT wl.* FROM {$this->table} wl
+                JOIN webhooks w ON wl.webhook_id = w.id
+                WHERE w.tenant_id = ?";
+        $params = [$tenantId];
+
+        foreach ($filters as $key => $value) {
+            if ($value !== null && $this->isValidColumn($key)) {
+                $sql .= " AND wl.{$key} = ?";
+                $params[] = $value;
+            }
+        }
+
+        $sql .= " ORDER BY wl.id DESC LIMIT ? OFFSET ?";
+        $params[] = $limit;
+        $params[] = $offset;
+
+        $stmt = $this->query($sql, $params);
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Override count to enforce tenant isolation via webhook
+     *
+     * @param array $filters
+     * @param int|null $tenantId
+     * @return int
+     */
+    public function count($filters = [], $tenantId = null) {
+        if ($tenantId === null) {
+            return parent::count($filters, null);
+        }
+
+        $sql = "SELECT COUNT(*) as total FROM {$this->table} wl
+                JOIN webhooks w ON wl.webhook_id = w.id
+                WHERE w.tenant_id = ?";
+        $params = [$tenantId];
+
+        foreach ($filters as $key => $value) {
+            if ($value !== null && $this->isValidColumn($key)) {
+                $sql .= " AND wl.{$key} = ?";
+                $params[] = $value;
+            }
+        }
+
+        $stmt = $this->query($sql, $params);
+        $result = $stmt->fetch();
+        return (int) $result['total'];
+    }
+
+    /**
      * Override delete to enforce tenant isolation via webhook
      *
      * @param int $id

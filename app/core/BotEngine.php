@@ -94,12 +94,16 @@ class BotEngine {
 
             switch ($step['action_type']) {
                 case 'send_text':
-                    $replies[] = [
-                        'type' => 'text',
-                        'content' => $config['message'],
-                        'triggered_by' => 'flow',
-                        'flow_id' => $flow['id']
-                    ];
+                    if (isset($config['message'])) {
+                        $replies[] = [
+                            'type' => 'text',
+                            'content' => $config['message'],
+                            'triggered_by' => 'flow',
+                            'flow_id' => $flow['id']
+                        ];
+                    } else {
+                        error_log("Missing 'message' in send_text config for step {$step['id']}");
+                    }
                     break;
 
                 case 'send_media':
@@ -113,17 +117,21 @@ class BotEngine {
                     break;
 
                 case 'ask_question':
-                    $replies[] = [
-                        'type' => 'text',
-                        'content' => $config['question'],
-                        'triggered_by' => 'flow',
-                        'flow_id' => $flow['id']
-                    ];
-                    // Save variable key for next message
-                    if (isset($config['variable'])) {
-                        require_once __DIR__ . '/../models/ConversationVariable.php';
-                        $varModel = new ConversationVariable();
-                        $varModel->setVariable($conversationId, '_awaiting_input', $config['variable']);
+                    if (isset($config['question'])) {
+                        $replies[] = [
+                            'type' => 'text',
+                            'content' => $config['question'],
+                            'triggered_by' => 'flow',
+                            'flow_id' => $flow['id']
+                        ];
+                        // Save variable key for next message
+                        if (isset($config['variable'])) {
+                            require_once __DIR__ . '/../models/ConversationVariable.php';
+                            $varModel = new ConversationVariable();
+                            $varModel->setVariable($conversationId, '_awaiting_input', $config['variable']);
+                        }
+                    } else {
+                        error_log("Missing 'question' in ask_question config for step {$step['id']}");
                     }
                     break;
 

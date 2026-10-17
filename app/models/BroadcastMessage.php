@@ -65,6 +65,89 @@ class BroadcastMessage extends Model {
     }
 
     /**
+     * Override find to enforce tenant isolation via broadcast
+     *
+     * @param int $id
+     * @param int|null $tenantId
+     * @return array|null
+     */
+    public function find($id, $tenantId = null) {
+        if ($tenantId === null) {
+            return parent::find($id, null);
+        }
+
+        $sql = "SELECT bm.* FROM {$this->table} bm
+                JOIN broadcasts b ON bm.broadcast_id = b.id
+                WHERE bm.id = ? AND b.tenant_id = ?
+                LIMIT 1";
+        $stmt = $this->query($sql, [$id, $tenantId]);
+        return $stmt->fetch() ?: null;
+    }
+
+    /**
+     * Override findAll to enforce tenant isolation via broadcast
+     *
+     * @param array $filters
+     * @param int|null $tenantId
+     * @param int $limit
+     * @param int $offset
+     * @return array
+     */
+    public function findAll($filters = [], $tenantId = null, $limit = 100, $offset = 0) {
+        if ($tenantId === null) {
+            return parent::findAll($filters, null, $limit, $offset);
+        }
+
+        $sql = "SELECT bm.* FROM {$this->table} bm
+                JOIN broadcasts b ON bm.broadcast_id = b.id
+                WHERE b.tenant_id = ?";
+        $params = [$tenantId];
+
+        foreach ($filters as $key => $value) {
+            if ($value !== null && $this->isValidColumn($key)) {
+                $sql .= " AND bm.{$key} = ?";
+                $params[] = $value;
+            }
+        }
+
+        $sql .= " ORDER BY bm.id DESC LIMIT ? OFFSET ?";
+        $params[] = $limit;
+        $params[] = $offset;
+
+        $stmt = $this->query($sql, $params);
+        return $stmt->fetchAll();
+    }
+
+    /**
+     * Override count to enforce tenant isolation via broadcast
+     *
+     * @param array $filters
+     * @param int|null $tenantId
+     * @return int
+     */
+    public function count($filters = [], $tenantId = null) {
+        if ($tenantId === null) {
+            return parent::count($filters, null);
+        }
+
+        $sql = "SELECT COUNT(*) as total FROM {$this->table} bm
+                JOIN broadcasts b ON bm.broadcast_id = b.id
+                WHERE b.tenant_id = ?";
+        $params = [$tenantId];
+
+        foreach ($filters as $key => $value) {
+            if ($value !== null && $this->isValidColumn($key)) {
+                $sql .= " AND bm.{$key} = ?";
+                $params[] = $value;
+            }
+        }
+
+        $stmt = $this->query($sql, $params);
+        $result = $stmt->fetch();
+        return (int) $result['total'];
+    }
+
+    /**
      * Override delete to enforce tenant isolation via broadcast
      *
      * @param int $id

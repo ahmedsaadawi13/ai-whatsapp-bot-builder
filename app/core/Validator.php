@@ -161,11 +161,13 @@ class Validator {
 
     /**
      * Validate SQL identifier (table/column name)
+     * Uses same pattern as Model::isValidColumn() for consistency
      *
      * @param string $identifier
      * @return bool
      */
     private function isValidIdentifier($identifier) {
+        // Pattern must match Model::isValidColumn() - only alphanumeric and underscores
         return preg_match('/^[a-zA-Z0-9_]+$/', $identifier) === 1;
     }
 
