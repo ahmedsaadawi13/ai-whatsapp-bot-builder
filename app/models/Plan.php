@@ -2,31 +2,19 @@
 // FILE: /app/models/Plan.php
 
 /**
- * Plan Model
- *
- * Handles subscription plan data.
+ * Plan Model - subscription plans with resource limits (global, not tenant-scoped).
  */
 class Plan extends Model {
 
     protected $table = 'plans';
+    protected $tenantScoped = false;
 
-    /**
-     * Get all active plans
-     *
-     * @return array
-     */
     public function getActivePlans() {
-        $sql = "SELECT * FROM {$this->table} WHERE status = 'active' ORDER BY price ASC";
-        $stmt = $this->query($sql);
-        return $stmt->fetchAll();
+        return $this->query("SELECT * FROM {$this->table} WHERE status = 'active' ORDER BY price ASC")->fetchAll();
     }
 
-    /**
-     * Check if table has tenant_id column
-     *
-     * @return bool
-     */
-    protected function hasTenantId() {
-        return false; // Plans table doesn't have tenant_id
+    public function findActive($id) {
+        $stmt = $this->query("SELECT * FROM {$this->table} WHERE id = ? AND status = 'active' LIMIT 1", [(int) $id]);
+        return $stmt->fetch() ?: null;
     }
 }

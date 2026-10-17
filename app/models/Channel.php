@@ -2,44 +2,61 @@
 // FILE: /app/models/Channel.php
 
 /**
- * Channel Model
- *
- * Handles WhatsApp channel/phone number data.
+ * Channel Model - a WhatsApp number connected through a (simulated) provider.
+ * provider_config is stored encrypted (see Crypto).
  */
 class Channel extends Model {
 
     protected $table = 'channels';
+    protected $searchable = ['name', 'phone_number'];
 
-    /**
-     * Get channels by tenant with bot count
-     *
-     * @param int $tenantId
-     * @param int $limit
-     * @param int $offset
-     * @return array
-     */
-    public function getByTenantWithBots($tenantId, $limit = 100, $offset = 0) {
-        $sql = "SELECT c.*, COUNT(b.id) as bot_count
+    public function listWithBotCount($tenantId, $filters, $search, $limit, $offset) {
+        list($where, $params) = $this->buildWhere($filters, $tenantId, $search, 'c');
+        $sql = "SELECT c.*, (SELECT COUNT(*) FROM bots b WHERE b.channel_id = c.id) AS bot_count
                 FROM {$this->table} c
-                LEFT JOIN bots b ON c.id = b.channel_id
-                WHERE c.tenant_id = ?
-                GROUP BY c.id
-                ORDER BY c.id DESC
-                LIMIT ? OFFSET ?";
-        $stmt = $this->query($sql, [$tenantId, $limit, $offset]);
-        return $stmt->fetchAll();
+                WHERE {$where}
+                ORDER BY c.id DESC " . $this->limitClause($limit, $offset);
+        return $this->query($sql, $params)->fetchAll();
     }
 
-    /**
-     * Find channel by phone number
-     *
-     * @param string $phoneNumber
-     * @param int $tenantId
-     * @return array|null
-     */
-    public function findByPhoneNumber($phoneNumber, $tenantId) {
-        $sql = "SELECT * FROM {$this->table} WHERE phone_number = ? AND tenant_id = ? LIMIT 1";
-        $stmt = $this->query($sql, [$phoneNumber, $tenantId]);
+    public function getForSelect($tenantId) {
+        return $this->query(
+            "SELECT id, name, phone_number, status FROM {$this->table} WHERE tenant_id = ? ORDER BY name",
+            [$tenantId]
+        )->fetchAll();
+    }
+
+    /** Global lookup used by the webhook receiver (phone numbers are unique). */
+    public function findActiveByPhone($phoneNumber) {
+        $stmt = $this->query(
+            "SELECT * FROM {$this->table} WHERE phone_number = ? AND status = 'active' LIMIT 1",
+            [$phoneNumber]
+        );
         return $stmt->fetch() ?: null;
+    }
+
+    public function phoneExists($phoneNumber, $exceptId = 0) {
+        $stmt = $this->query(
+            "SELECT 1 FROM {$this->table} WHERE phone_number = ? AND id != ? LIMIT 1",
+            [$phoneNumber, (int) $exceptId]
+        );
+        return (bool) $stmt->fetch();
+    }
+
+    public function findByVerifyToken($token) {
+        $stmt = $this->query(
+            "SELECT * FROM {$this->table} WHERE webhook_verify_token = ? AND status = 'active' LIMIT 1",
+            [$token]
+        );
+        return $stmt->fetch() ?: null;
+    }
+
+    /** Decrypted provider config as an array. */
+    public static function decodeConfig($stored) {
+        return json_array(Crypto::decrypt($stored));
+    }
+
+    public static function encodeConfig($config) {
+        return Crypto::encrypt(json_encode($config ?: new stdClass()));
     }
 }

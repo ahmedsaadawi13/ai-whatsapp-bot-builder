@@ -1,0 +1,6 @@
+# FILE: /storage/.htaccess
+# Uploads are served through /files with access checks - never directly.
+Deny from all
+<IfModule mod_authz_core.c>
+    Require all denied
+</IfModule>

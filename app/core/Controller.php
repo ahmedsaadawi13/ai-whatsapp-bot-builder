@@ -4,88 +4,82 @@
 /**
  * Base Controller Class
  *
- * Provides common functionality for all controllers including
- * view rendering, redirects, and JSON responses.
+ * Shared helpers: rendering, redirects, JSON, auth/role/tenant guards,
+ * CSRF checks, pagination and validation.
  */
 class Controller {
+
+    /** Roles allowed to build bots, flows, KB, templates and broadcasts. */
+    const BUILDER_ROLES = ['tenant_admin', 'developer'];
+
+    /** Roles allowed to manage webhooks and API keys. */
+    const DEVELOPER_ROLES = ['tenant_admin', 'developer'];
+
+    /** Every tenant-level role. */
+    const TENANT_ROLES = ['tenant_admin', 'agent', 'developer'];
 
     protected $auth;
     protected $session;
     protected $request;
 
     public function __construct() {
-        $this->auth = new Auth();
         $this->session = new Session();
+        $this->auth = new Auth();
         $this->request = new Request();
     }
 
-    /**
-     * Load and render a view
-     *
-     * @param string $view View file name (e.g., 'dashboard/index')
-     * @param array $data Data to pass to view
-     * @param string|null $layout Layout file name or null for no layout
-     */
     protected function view($view, $data = [], $layout = 'layout') {
-        $viewRenderer = new View();
-        $viewRenderer->render($view, $data, $layout);
+        $renderer = new View();
+        $renderer->render($view, $data, $layout);
     }
 
-    /**
-     * Redirect to URL
-     *
-     * @param string $url
-     * @param int $code HTTP status code
-     */
     protected function redirect($url, $code = 302) {
+        // Only allow local redirects to avoid open-redirect issues.
+        if (!is_string($url) || $url === '' || $url[0] !== '/' || strpos($url, '//') === 0) {
+            $url = '/';
+        }
         header("Location: {$url}", true, $code);
         exit;
     }
 
-    /**
-     * Return JSON response
-     *
-     * @param mixed $data
-     * @param int $statusCode
-     */
+    /** Redirect back to the referring page (same host only). */
+    protected function back($fallback = '/dashboard') {
+        $referer = isset($_SERVER['HTTP_REFERER']) ? $_SERVER['HTTP_REFERER'] : '';
+        $path = parse_url($referer, PHP_URL_PATH);
+        $query = parse_url($referer, PHP_URL_QUERY);
+        $host = parse_url($referer, PHP_URL_HOST);
+        $currentHost = isset($_SERVER['HTTP_HOST']) ? parse_url('http://' . $_SERVER['HTTP_HOST'], PHP_URL_HOST) : null;
+        if ($path && $host === $currentHost) {
+            $this->redirect($path . ($query ? '?' . $query : ''));
+        }
+        $this->redirect($fallback);
+    }
+
     protected function json($data, $statusCode = 200) {
         http_response_code($statusCode);
-        header('Content-Type: application/json');
+        header('Content-Type: application/json; charset=utf-8');
         echo json_encode($data);
         exit;
     }
 
-    /**
-     * Get current authenticated user
-     *
-     * @return array|null
-     */
+    protected function abort($code = 404, $message = 'Page not found') {
+        http_response_code($code);
+        $this->view('errors/error', ['title' => $message, 'code' => $code, 'message' => $message], 'layout');
+        exit;
+    }
+
     protected function getUser() {
         return $this->auth->user();
     }
 
-    /**
-     * Get current tenant ID
-     *
-     * @return int|null
-     */
     protected function getTenantId() {
-        $user = $this->getUser();
-        return $user ? (int) $user['tenant_id'] : null;
+        return $this->auth->tenantId();
     }
 
-    /**
-     * Check if user is authenticated
-     *
-     * @return bool
-     */
     protected function isAuthenticated() {
-        return $this->auth->check();
+        return $this->auth->user() !== null;
     }
 
-    /**
-     * Require authentication (redirect if not authenticated)
-     */
     protected function requireAuth() {
         if (!$this->isAuthenticated()) {
             $this->session->flash('error', 'Please login to access this page');
@@ -93,71 +87,92 @@ class Controller {
         }
     }
 
-    /**
-     * Check if user has specific role
-     *
-     * @param string|array $roles
-     * @return bool
-     */
     protected function hasRole($roles) {
-        $user = $this->getUser();
-        if (!$user) {
-            return false;
-        }
-
-        $roles = is_array($roles) ? $roles : [$roles];
-        return in_array($user['role'], $roles);
+        return $this->auth->hasRole($roles);
     }
 
     /**
-     * Require specific role (redirect if unauthorized)
-     *
-     * @param string|array $roles
+     * Require login with one of the given roles.
      */
     protected function requireRole($roles) {
         $this->requireAuth();
-
         if (!$this->hasRole($roles)) {
-            $this->session->flash('error', 'Unauthorized access');
-            $this->redirect('/dashboard');
+            $this->abort(403, 'You do not have permission to access this page');
         }
     }
 
     /**
-     * Validate CSRF token
-     *
-     * @return bool
+     * Require a tenant user (optionally limited to some roles) and return the tenant ID.
+     * Platform admins have no tenant and are sent to the tenant list.
      */
+    protected function requireTenant($roles = null) {
+        $this->requireAuth();
+        $tenantId = $this->getTenantId();
+        if ($tenantId === null) {
+            $this->session->flash('error', 'This page is only available inside a tenant account');
+            $this->redirect('/tenants');
+        }
+        if ($roles !== null && !$this->hasRole($roles)) {
+            $this->abort(403, 'You do not have permission to access this page');
+        }
+        return $tenantId;
+    }
+
     protected function validateCsrf() {
-        $token = $this->request->post('csrf_token');
+        $token = isset($_POST['csrf_token']) ? $_POST['csrf_token'] : null;
+        if (!$token && isset($_SERVER['HTTP_X_CSRF_TOKEN'])) {
+            $token = $_SERVER['HTTP_X_CSRF_TOKEN'];
+        }
         return CSRF::validate($token);
     }
 
     /**
-     * Require valid CSRF token
+     * Require POST with a valid CSRF token.
      */
     protected function requireCsrf() {
-        if (!$this->validateCsrf()) {
-            $this->json(['error' => 'Invalid CSRF token'], 403);
+        if (!$this->request->isPost() || !$this->validateCsrf()) {
+            if ($this->request->isAjax()) {
+                $this->json(['error' => 'Invalid CSRF token'], 403);
+            }
+            $this->session->flash('error', 'Your session expired. Please try again.');
+            $this->back();
         }
     }
 
     /**
-     * Get pagination data
-     *
-     * @param int $total Total records
-     * @param int $perPage Records per page
-     * @return array
+     * Load a tenant-owned record or show 404.
      */
+    protected function findOwned(Model $model, $id, $tenantId) {
+        $record = $model->find((int) $id, $tenantId);
+        if (!$record) {
+            $this->abort(404, 'Record not found');
+        }
+        return $record;
+    }
+
+    /**
+     * Flash validation errors + old input and go back.
+     */
+    protected function failValidation($errors, $redirect = null) {
+        $this->session->flash('error', 'Please fix the errors below');
+        $this->session->flash('errors', $errors);
+        $input = $_POST;
+        unset($input['password'], $input['password_confirmation'], $input['csrf_token']);
+        $this->session->set('_old_input', $input);
+        if ($redirect) {
+            $this->redirect($redirect);
+        }
+        $this->back();
+    }
+
     protected function getPagination($total, $perPage = 20) {
-        $page = max(1, (int) $this->request->get('page', 1));
-        $offset = ($page - 1) * $perPage;
-        $totalPages = ceil($total / $perPage);
+        $totalPages = max(1, (int) ceil($total / $perPage));
+        $page = min($totalPages, max(1, (int) $this->request->get('page', 1)));
 
         return [
             'page' => $page,
             'per_page' => $perPage,
-            'offset' => $offset,
+            'offset' => ($page - 1) * $perPage,
             'total' => $total,
             'total_pages' => $totalPages,
             'has_prev' => $page > 1,
@@ -165,13 +180,6 @@ class Controller {
         ];
     }
 
-    /**
-     * Validate input data
-     *
-     * @param array $data
-     * @param array $rules
-     * @return array Errors array
-     */
     protected function validate($data, $rules) {
         $validator = new Validator();
         return $validator->validate($data, $rules);

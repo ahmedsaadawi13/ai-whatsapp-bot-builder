@@ -1,50 +1,69 @@
 <?php
 // FILE: /app/controllers/SubscriptionController.php
 
+/**
+ * Subscription Controller - current plan, usage vs limits, plan changes.
+ */
 class SubscriptionController extends Controller {
+
     public function index() {
-        $this->requireAuth();
-        $tenantId = $this->getTenantId();
-        require_once __DIR__ . '/../models/Subscription.php';
-        require_once __DIR__ . '/../models/UsageTracking.php';
-        $subscriptionModel = new Subscription();
-        $usageModel = new UsageTracking();
-        $subscription = $subscriptionModel->getActiveSubscription($tenantId);
-        $usage = $usageModel->getCurrentMonthUsage($tenantId);
-        if (!$usage) {
-            $usageModel->recalculate($tenantId);
-            $usage = $usageModel->getCurrentMonthUsage($tenantId);
-        }
-        $this->view('subscription/index', ['title' => 'Subscription', 'subscription' => $subscription, 'usage' => $usage]);
+        $tenantId = $this->requireTenant(['tenant_admin']);
+        (new UsageTracking())->recalculate($tenantId);
+        $this->view('subscription/index', [
+            'title' => 'Subscription',
+            'subscription' => (new Subscription())->getActiveSubscription($tenantId),
+            'quota' => QuotaService::summary($tenantId),
+            'history' => (new Subscription())->getHistory($tenantId),
+            'usageHistory' => (new UsageTracking())->getHistory($tenantId, 6)
+        ]);
     }
 
     public function plans() {
-        $this->requireAuth();
-        require_once __DIR__ . '/../models/Plan.php';
-        $planModel = new Plan();
-        $plans = $planModel->getActivePlans();
-        $this->view('subscription/plans', ['title' => 'Plans', 'plans' => $plans]);
+        $tenantId = $this->requireTenant(['tenant_admin']);
+        $this->view('subscription/plans', [
+            'title' => 'Plans',
+            'plans' => (new Plan())->getActivePlans(),
+            'subscription' => (new Subscription())->getActiveSubscription($tenantId)
+        ]);
     }
 
+    /**
+     * Switch plan. Downgrades are refused while current usage exceeds the
+     * new plan's limits. A pending invoice is created for paid plans.
+     */
     public function changePlan() {
-        $this->requireAuth();
+        $tenantId = $this->requireTenant(['tenant_admin']);
         $this->requireCsrf();
-        $tenantId = $this->getTenantId();
-        $planId = $this->request->post('plan_id');
-        require_once __DIR__ . '/../models/Subscription.php';
-        $subscriptionModel = new Subscription();
-        $current = $subscriptionModel->getActiveSubscription($tenantId);
-        if ($current) {
-            $subscriptionModel->update($current['id'], ['status' => 'cancelled'], $tenantId);
+
+        $plan = (new Plan())->findActive((int) $this->request->post('plan_id'));
+        if (!$plan) {
+            $this->session->flash('error', 'Please choose a valid plan');
+            $this->redirect('/subscription/plans');
         }
-        $subscriptionModel->create([
-            'tenant_id' => $tenantId,
-            'plan_id' => $planId,
-            'status' => 'active',
-            'started_at' => date('Y-m-d H:i:s'),
-            'expires_at' => date('Y-m-d H:i:s', strtotime('+1 month'))
-        ]);
-        $this->session->flash('success', 'Plan changed successfully');
+        $current = (new Subscription())->getActiveSubscription($tenantId);
+        if ($current && (int) $current['plan_id'] === (int) $plan['id']) {
+            $this->session->flash('error', 'You are already on the ' . $plan['name'] . ' plan');
+            $this->redirect('/subscription/plans');
+        }
+
+        $blocking = [];
+        foreach (['channels' => 'max_channels', 'bots' => 'max_bots', 'contacts' => 'max_contacts', 'storage' => 'max_storage_mb'] as $resource => $limitKey) {
+            $used = QuotaService::used($tenantId, $resource);
+            if ($used > (int) $plan[$limitKey]) {
+                $blocking[] = QuotaService::label($resource) . " ({$used} used, plan allows {$plan[$limitKey]})";
+            }
+        }
+        if (!empty($blocking)) {
+            $this->session->flash('error', 'Cannot switch to ' . $plan['name'] . ': reduce usage first - ' . implode('; ', $blocking));
+            $this->redirect('/subscription/plans');
+        }
+
+        $result = (new Subscription())->switchPlan($tenantId, $plan);
+        if ($result['invoice_id']) {
+            $this->session->flash('success', 'Plan changed to ' . $plan['name'] . '. An invoice was created - pay it to keep your subscription active.');
+            $this->redirect('/billing/invoices/' . $result['invoice_id']);
+        }
+        $this->session->flash('success', 'Plan changed to ' . $plan['name']);
         $this->redirect('/subscription');
     }
 }

@@ -2,240 +2,73 @@
 // FILE: /app/models/BroadcastMessage.php
 
 /**
- * BroadcastMessage Model
+ * BroadcastMessage Model - one recipient of a broadcast.
  *
- * Handles individual broadcast message records.
+ * The table has no tenant_id; every read joins broadcasts to enforce the
+ * tenant. The generic find/update/delete refuse a tenant ID (fail closed).
  */
 class BroadcastMessage extends Model {
 
     protected $table = 'broadcast_messages';
+    protected $tenantScoped = false;
+    protected $hasUpdatedAt = false;
 
-    /**
-     * Get messages by broadcast (with optional tenant isolation)
-     *
-     * @param int $broadcastId
-     * @param string|null $status
-     * @param int $limit
-     * @param int $offset
-     * @param int|null $tenantId Optional tenant ID for isolation
-     * @return array
-     */
-    public function getByBroadcast($broadcastId, $status = null, $limit = 100, $offset = 0, $tenantId = null) {
-        $sql = "SELECT bm.*, c.name as contact_name, c.phone_number
+    public function getByBroadcast($broadcastId, $tenantId, $status = null, $limit = 50, $offset = 0) {
+        list($where, $params) = $this->recipientWhere($broadcastId, $tenantId, $status);
+        $sql = "SELECT bm.*, c.name AS contact_name, c.phone_number
                 FROM {$this->table} bm
-                JOIN contacts c ON bm.contact_id = c.id";
+                JOIN broadcasts b ON b.id = bm.broadcast_id
+                JOIN contacts c ON c.id = bm.contact_id
+                WHERE {$where}
+                ORDER BY bm.id ASC " . $this->limitClause($limit, $offset);
+        return $this->query($sql, $params)->fetchAll();
+    }
 
-        if ($tenantId !== null) {
-            $sql .= " JOIN broadcasts b ON bm.broadcast_id = b.id
-                      WHERE bm.broadcast_id = ? AND b.tenant_id = ?";
-            $params = [$broadcastId, $tenantId];
-        } else {
-            $sql .= " WHERE bm.broadcast_id = ?";
-            $params = [$broadcastId];
-        }
+    public function countByBroadcast($broadcastId, $tenantId, $status = null) {
+        list($where, $params) = $this->recipientWhere($broadcastId, $tenantId, $status);
+        $sql = "SELECT COUNT(*) AS total FROM {$this->table} bm JOIN broadcasts b ON b.id = bm.broadcast_id WHERE {$where}";
+        return (int) $this->query($sql, $params)->fetch()['total'];
+    }
 
-        if ($status !== null) {
-            $sql .= " AND bm.status = ?";
+    private function recipientWhere($broadcastId, $tenantId, $status) {
+        $where = 'bm.broadcast_id = ? AND b.tenant_id = ?';
+        $params = [$broadcastId, $tenantId];
+        if ($status !== null && in_array($status, ['pending', 'sent', 'failed'], true)) {
+            $where .= ' AND bm.status = ?';
             $params[] = $status;
         }
-
-        $sql .= " ORDER BY bm.id DESC LIMIT ? OFFSET ?";
-        $params[] = (int)$limit;
-        $params[] = (int)$offset;
-
-        $stmt = $this->query($sql, $params);
-        return $stmt->fetchAll();
+        return [$where, $params];
     }
 
-    /**
-     * Mark as sent (with optional tenant verification)
-     *
-     * @param int $id
-     * @param int|null $tenantId Optional tenant ID for isolation
-     * @return bool
-     */
-    public function markAsSent($id, $tenantId = null) {
-        if ($tenantId !== null) {
-            // Verify via JOIN before updating
-            $sql = "UPDATE {$this->table} bm
-                    JOIN broadcasts b ON bm.broadcast_id = b.id
-                    SET bm.status = 'sent', bm.sent_at = NOW()
-                    WHERE bm.id = ? AND b.tenant_id = ?";
-            $stmt = $this->query($sql, [$id, $tenantId]);
-        } else {
-            $sql = "UPDATE {$this->table} SET status = 'sent', sent_at = NOW() WHERE id = ?";
-            $stmt = $this->query($sql, [$id]);
+    /** Queue recipients (idempotent thanks to the unique broadcast+contact key). */
+    public function queue($broadcastId, $contactIds) {
+        $now = date('Y-m-d H:i:s');
+        foreach ($contactIds as $contactId) {
+            $this->query(
+                "INSERT IGNORE INTO {$this->table} (broadcast_id, contact_id, status, created_at) VALUES (?, ?, 'pending', ?)",
+                [$broadcastId, (int) $contactId, $now]
+            );
         }
-        return $stmt->rowCount() > 0;
     }
 
-    /**
-     * Mark as failed (with optional tenant verification)
-     *
-     * @param int $id
-     * @param string $errorMessage
-     * @param int|null $tenantId Optional tenant ID for isolation
-     * @return bool
-     */
-    public function markAsFailed($id, $errorMessage, $tenantId = null) {
-        if ($tenantId !== null) {
-            // Verify via JOIN before updating
-            $sql = "UPDATE {$this->table} bm
-                    JOIN broadcasts b ON bm.broadcast_id = b.id
-                    SET bm.status = 'failed', bm.error_message = ?
-                    WHERE bm.id = ? AND b.tenant_id = ?";
-            $stmt = $this->query($sql, [$errorMessage, $id, $tenantId]);
-        } else {
-            $sql = "UPDATE {$this->table} SET status = 'failed', error_message = ? WHERE id = ?";
-            $stmt = $this->query($sql, [$errorMessage, $id]);
-        }
-        return $stmt->rowCount() > 0;
+    public function getPending($broadcastId, $limit = 500) {
+        return $this->query(
+            "SELECT * FROM {$this->table} WHERE broadcast_id = ? AND status = 'pending' ORDER BY id " . $this->limitClause($limit),
+            [$broadcastId]
+        )->fetchAll();
     }
 
-    /**
-     * Override find to enforce tenant isolation via broadcast
-     *
-     * @param int $id
-     * @param int|null $tenantId
-     * @return array|null
-     */
-    public function find($id, $tenantId = null) {
-        if ($tenantId === null) {
-            return parent::find($id, null);
-        }
-
-        $sql = "SELECT bm.* FROM {$this->table} bm
-                JOIN broadcasts b ON bm.broadcast_id = b.id
-                WHERE bm.id = ? AND b.tenant_id = ?
-                LIMIT 1";
-        $stmt = $this->query($sql, [$id, $tenantId]);
-        return $stmt->fetch() ?: null;
+    public function markAsSent($id, $messageId) {
+        $this->query(
+            "UPDATE {$this->table} SET status = 'sent', sent_at = ?, message_id = ?, error_message = NULL WHERE id = ?",
+            [date('Y-m-d H:i:s'), $messageId, $id]
+        );
     }
 
-    /**
-     * Override findAll to enforce tenant isolation via broadcast
-     *
-     * @param array $filters
-     * @param int|null $tenantId
-     * @param int $limit
-     * @param int $offset
-     * @return array
-     */
-    public function findAll($filters = [], $tenantId = null, $limit = 100, $offset = 0) {
-        if ($tenantId === null) {
-            return parent::findAll($filters, null, $limit, $offset);
-        }
-
-        $sql = "SELECT bm.* FROM {$this->table} bm
-                JOIN broadcasts b ON bm.broadcast_id = b.id
-                WHERE b.tenant_id = ?";
-        $params = [$tenantId];
-
-        foreach ($filters as $key => $value) {
-            if ($value !== null && $this->isValidColumn($key)) {
-                $sql .= " AND bm.{$key} = ?";
-                $params[] = $value;
-            }
-        }
-
-        $sql .= " ORDER BY bm.id DESC LIMIT ? OFFSET ?";
-        $params[] = (int)$limit;
-        $params[] = (int)$offset;
-
-        $stmt = $this->query($sql, $params);
-        return $stmt->fetchAll();
-    }
-
-    /**
-     * Override count to enforce tenant isolation via broadcast
-     *
-     * @param array $filters
-     * @param int|null $tenantId
-     * @return int
-     */
-    public function count($filters = [], $tenantId = null) {
-        if ($tenantId === null) {
-            return parent::count($filters, null);
-        }
-
-        $sql = "SELECT COUNT(*) as total FROM {$this->table} bm
-                JOIN broadcasts b ON bm.broadcast_id = b.id
-                WHERE b.tenant_id = ?";
-        $params = [$tenantId];
-
-        foreach ($filters as $key => $value) {
-            if ($value !== null && $this->isValidColumn($key)) {
-                $sql .= " AND bm.{$key} = ?";
-                $params[] = $value;
-            }
-        }
-
-        $stmt = $this->query($sql, $params);
-        $result = $stmt->fetch();
-        return (int) $result['total'];
-    }
-
-    /**
-     * Override update to enforce tenant isolation via broadcast
-     *
-     * @param int $id
-     * @param array $data
-     * @param int|null $tenantId
-     * @return bool
-     */
-    public function update($id, $data, $tenantId = null) {
-        if ($tenantId === null) {
-            return parent::update($id, $data, null);
-        }
-
-        $data['updated_at'] = date('Y-m-d H:i:s');
-
-        $sets = [];
-        $params = [];
-
-        foreach ($data as $key => $value) {
-            $sets[] = "{$key} = ?";
-            $params[] = $value;
-        }
-
-        // Verify broadcast belongs to tenant before updating
-        $sql = "UPDATE {$this->table} bm
-                JOIN broadcasts b ON bm.broadcast_id = b.id
-                SET " . implode(', ', $sets) . "
-                WHERE bm.id = ? AND b.tenant_id = ?";
-        $params[] = $id;
-        $params[] = $tenantId;
-
-        $stmt = $this->query($sql, $params);
-        return $stmt->rowCount() > 0;
-    }
-
-    /**
-     * Override delete to enforce tenant isolation via broadcast
-     *
-     * @param int $id
-     * @param int|null $tenantId
-     * @return bool
-     */
-    public function delete($id, $tenantId = null) {
-        if ($tenantId === null) {
-            return parent::delete($id, null);
-        }
-
-        // Verify broadcast belongs to tenant before deleting message
-        $sql = "DELETE bm FROM {$this->table} bm
-                JOIN broadcasts b ON bm.broadcast_id = b.id
-                WHERE bm.id = ? AND b.tenant_id = ?";
-        $stmt = $this->query($sql, [$id, $tenantId]);
-        return $stmt->rowCount() > 0;
-    }
-
-    /**
-     * Check if table has tenant_id column
-     *
-     * @return bool
-     */
-    protected function hasTenantId() {
-        return false; // BroadcastMessage doesn't have tenant_id directly but enforces via JOIN
+    public function markAsFailed($id, $errorMessage) {
+        $this->query(
+            "UPDATE {$this->table} SET status = 'failed', error_message = ? WHERE id = ?",
+            [mb_substr($errorMessage, 0, 500, 'UTF-8'), $id]
+        );
     }
 }

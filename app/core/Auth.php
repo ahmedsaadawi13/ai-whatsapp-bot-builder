@@ -4,158 +4,176 @@
 /**
  * Authentication Manager
  *
- * Handles user authentication and authorization.
+ * Session-based login bound to a tenant. Includes simple brute-force
+ * throttling (5 failed attempts per email+IP per 15 minutes).
  */
 class Auth {
 
+    const MAX_ATTEMPTS = 5;            // per email + IP
+    const MAX_ATTEMPTS_PER_EMAIL = 20; // per email across all IPs
+    const LOCKOUT_MINUTES = 15;
+
     private $session;
     private $userModel;
-    private $cachedUser = null;
+
+    /** Per-request cache: false = not loaded yet. */
+    private static $cachedUser = false;
+
+    /** Last error from attempt(), for the login form. */
+    private $lastError = null;
 
     public function __construct() {
         $this->session = new Session();
-        require_once __DIR__ . '/../models/User.php';
         $this->userModel = new User();
     }
 
     /**
-     * Attempt to login user
-     *
-     * @param string $email
-     * @param string $password
-     * @return bool
+     * Try to log a user in.
      */
-    public function attempt($email, $password) {
-        $user = $this->userModel->findByEmail($email);
+    public function attempt($email, $password, $ip = '') {
+        $this->lastError = null;
+        $email = strtolower(trim($email));
 
-        if ($user && password_verify($password, $user['password'])) {
-            // Check if user is active
-            if ($user['status'] !== 'active') {
-                return false;
-            }
-
-            // Set session
-            $this->login($user);
-            return true;
+        if ($this->tooManyAttempts($email, $ip)) {
+            $this->lastError = 'Too many failed attempts. Try again in ' . self::LOCKOUT_MINUTES . ' minutes.';
+            return false;
         }
 
-        return false;
+        $user = $this->userModel->findByEmail($email);
+
+        if (!$user || !password_verify($password, $user['password'])) {
+            $this->recordFailure($email, $ip);
+            $this->lastError = 'Invalid email or password';
+            return false;
+        }
+
+        if ($user['status'] !== 'active') {
+            $this->lastError = 'Your account is inactive';
+            return false;
+        }
+
+        if ($user['tenant_id'] !== null) {
+            $tenant = (new Tenant())->find($user['tenant_id']);
+            if (!$tenant || $tenant['status'] !== 'active') {
+                $this->lastError = 'Your organization account is suspended';
+                return false;
+            }
+        }
+
+        $this->clearFailures($email, $ip);
+        $this->userModel->updateLastLogin($user['id']);
+        $this->login($user);
+        return true;
     }
 
-    /**
-     * Login user (set session)
-     *
-     * @param array $user
-     */
+    public function getLastError() {
+        return $this->lastError;
+    }
+
     public function login($user) {
         $this->session->regenerate();
-        $this->session->set('user_id', $user['id']);
-        $this->session->set('user', $user);
+        $this->session->set('user_id', (int) $user['id']);
+        self::$cachedUser = false;
     }
 
     /**
-     * Logout user
+     * Log out but keep the session alive so flash messages still work.
      */
     public function logout() {
         $this->session->remove('user_id');
-        $this->session->remove('user');
-        $this->session->destroy();
+        $this->session->remove('csrf_token');
+        $this->session->regenerate();
+        self::$cachedUser = null;
     }
 
-    /**
-     * Check if user is authenticated
-     *
-     * @return bool
-     */
     public function check() {
-        return $this->session->has('user_id');
+        return $this->user() !== null;
     }
 
     /**
-     * Get authenticated user (cached within request)
-     *
-     * @return array|null
+     * Current user (loaded once per request). Deleted or deactivated
+     * users are logged out automatically.
      */
     public function user() {
-        if (!$this->check()) {
+        if (self::$cachedUser !== false) {
+            return self::$cachedUser;
+        }
+
+        $userId = $this->session->get('user_id');
+        if (!$userId) {
+            self::$cachedUser = null;
             return null;
         }
 
-        // Return cached user if available in this request
-        if ($this->cachedUser !== null) {
-            return $this->cachedUser;
+        $user = $this->userModel->find((int) $userId);
+        if (!$user || $user['status'] !== 'active') {
+            $this->logout();
+            return null;
         }
-
-        $user = $this->session->get('user');
-
-        // Refresh user data from database once per request
-        if ($user) {
-            $freshUser = $this->userModel->find($user['id']);
-            if ($freshUser) {
-                $this->session->set('user', $freshUser);
-                $this->cachedUser = $freshUser;
-                return $freshUser;
-            } else {
-                // User was deleted - clean up session
+        // A suspended/cancelled tenant loses access immediately, not only at next login.
+        if ($user['tenant_id'] !== null) {
+            $tenant = (new Tenant())->find($user['tenant_id']);
+            if (!$tenant || $tenant['status'] !== 'active') {
                 $this->logout();
                 return null;
             }
         }
 
-        return null;
+        unset($user['password']);
+        self::$cachedUser = $user;
+        return $user;
     }
 
-    /**
-     * Get user ID
-     *
-     * @return int|null
-     */
     public function id() {
         $user = $this->user();
         return $user ? (int) $user['id'] : null;
     }
 
-    /**
-     * Get tenant ID of authenticated user
-     *
-     * @return int|null
-     */
     public function tenantId() {
         $user = $this->user();
-        return $user && isset($user['tenant_id']) ? (int) $user['tenant_id'] : null;
+        return ($user && $user['tenant_id'] !== null) ? (int) $user['tenant_id'] : null;
     }
 
-    /**
-     * Check if user has role
-     *
-     * @param string|array $roles
-     * @return bool
-     */
     public function hasRole($roles) {
         $user = $this->user();
         if (!$user) {
             return false;
         }
-
         $roles = is_array($roles) ? $roles : [$roles];
-        return in_array($user['role'], $roles);
+        return in_array($user['role'], $roles, true);
     }
 
-    /**
-     * Check if user is platform admin
-     *
-     * @return bool
-     */
     public function isPlatformAdmin() {
         return $this->hasRole('platform_admin');
     }
 
-    /**
-     * Check if user is tenant admin
-     *
-     * @return bool
-     */
     public function isTenantAdmin() {
         return $this->hasRole('tenant_admin');
+    }
+
+    /** Reset the per-request cache (used by tests). */
+    public static function flushCache() {
+        self::$cachedUser = false;
+    }
+
+    private function tooManyAttempts($email, $ip) {
+        $db = Database::getInstance()->getConnection();
+        $stmt = $db->prepare("SELECT COUNT(*) AS total, COALESCE(SUM(ip_address = ?), 0) AS from_ip
+                              FROM login_attempts WHERE email = ? AND created_at > ?");
+        $stmt->execute([$ip, $email, date('Y-m-d H:i:s', time() - self::LOCKOUT_MINUTES * 60)]);
+        $row = $stmt->fetch();
+        return (int) $row['from_ip'] >= self::MAX_ATTEMPTS || (int) $row['total'] >= self::MAX_ATTEMPTS_PER_EMAIL;
+    }
+
+    private function recordFailure($email, $ip) {
+        $db = Database::getInstance()->getConnection();
+        $stmt = $db->prepare("INSERT INTO login_attempts (email, ip_address, created_at) VALUES (?, ?, ?)");
+        $stmt->execute([$email, $ip, date('Y-m-d H:i:s')]);
+    }
+
+    private function clearFailures($email, $ip) {
+        $db = Database::getInstance()->getConnection();
+        $stmt = $db->prepare("DELETE FROM login_attempts WHERE email = ? AND ip_address = ?");
+        $stmt->execute([$email, $ip]);
     }
 }

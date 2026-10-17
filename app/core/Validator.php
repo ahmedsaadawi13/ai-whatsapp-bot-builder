@@ -48,6 +48,8 @@ class Validator {
             $params = explode(',', $paramString);
         }
 
+        $label = ucfirst(str_replace('_', ' ', $field));
+
         switch ($rule) {
             case 'required':
                 if (empty($value) && $value !== '0') {
@@ -112,6 +114,34 @@ class Validator {
                 }
                 break;
 
+            case 'phone':
+                // E.164: + followed by 8-15 digits
+                if ($value && !self::isValidPhone($value)) {
+                    $this->addError($field, $label . ' must be in international format, e.g. +15551234567');
+                }
+                break;
+
+            case 'integer':
+                if ($value !== null && $value !== '' && filter_var($value, FILTER_VALIDATE_INT) === false) {
+                    $this->addError($field, $label . ' must be a whole number');
+                }
+                break;
+
+            case 'json':
+                if ($value !== null && $value !== '') {
+                    json_decode($value);
+                    if (json_last_error() !== JSON_ERROR_NONE) {
+                        $this->addError($field, $label . ' must be valid JSON');
+                    }
+                }
+                break;
+
+            case 'datetime':
+                if ($value && strtotime($value) === false) {
+                    $this->addError($field, $label . ' must be a valid date/time');
+                }
+                break;
+
             case 'unique':
                 // Format: unique:table,column,exceptId
                 if ($value) {
@@ -169,6 +199,24 @@ class Validator {
     private function isValidIdentifier($identifier) {
         // Pattern must match Model::isValidColumn() - only alphanumeric and underscores
         return preg_match('/^[a-zA-Z0-9_]+$/', $identifier) === 1;
+    }
+
+    /**
+     * E.164 phone number check, shared with the API.
+     */
+    public static function isValidPhone($phone) {
+        return is_string($phone) && preg_match('/^\+[1-9][0-9]{7,14}$/', $phone) === 1;
+    }
+
+    /**
+     * Normalize a phone number: strip spaces, dashes, brackets; "00" -> "+".
+     */
+    public static function normalizePhone($phone) {
+        $phone = preg_replace('/[\s\-\(\)\.]/', '', (string) $phone);
+        if (strpos($phone, '00') === 0) {
+            $phone = '+' . substr($phone, 2);
+        }
+        return $phone;
     }
 
     /**

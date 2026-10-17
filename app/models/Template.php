@@ -2,53 +2,45 @@
 // FILE: /app/models/Template.php
 
 /**
- * Template Model
- *
- * Handles message template data.
+ * Template Model - reusable message templates with {{placeholders}}.
  */
 class Template extends Model {
 
+    const CATEGORIES = ['notification', 'support', 'marketing', 'other'];
+
     protected $table = 'templates';
+    protected $searchable = ['name', 'body'];
 
     /**
-     * Parse template with variables
-     *
-     * @param string $template
-     * @param array $variables
-     * @return string
+     * Replace {{key}} placeholders. Unknown placeholders become empty strings.
      */
-    public function parseTemplate($template, $variables) {
-        foreach ($variables as $key => $value) {
-            $template = str_replace('{{' . $key . '}}', $value, $template);
-        }
-        return $template;
+    public static function render($text, $variables) {
+        return preg_replace_callback('/\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/', function ($m) use ($variables) {
+            return isset($variables[$m[1]]) ? (string) $variables[$m[1]] : '';
+        }, (string) $text);
     }
 
-    /**
-     * Get template with parsed content
-     *
-     * @param int $id
-     * @param int $tenantId
-     * @param array $variables
-     * @return array|null
-     */
-    public function getWithParsedContent($id, $tenantId, $variables = []) {
-        $template = $this->find($id, $tenantId);
+    /** List placeholder names used in a text, e.g. ["name", "order_id"]. */
+    public static function extractVariables($text) {
+        preg_match_all('/\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}/', (string) $text, $m);
+        return array_values(array_unique($m[1]));
+    }
 
-        if (!$template) {
-            return null;
+    /** Full message (header + body + footer) rendered for one contact. */
+    public static function renderFull($template, $variables) {
+        $parts = [];
+        foreach (['header', 'body', 'footer'] as $part) {
+            if (!empty($template[$part])) {
+                $parts[] = self::render($template[$part], $variables);
+            }
         }
+        return implode("\n\n", $parts);
+    }
 
-        $template['parsed_body'] = $this->parseTemplate($template['body'], $variables);
-
-        if ($template['header']) {
-            $template['parsed_header'] = $this->parseTemplate($template['header'], $variables);
-        }
-
-        if ($template['footer']) {
-            $template['parsed_footer'] = $this->parseTemplate($template['footer'], $variables);
-        }
-
-        return $template;
+    public function getActiveForSelect($tenantId) {
+        return $this->query(
+            "SELECT id, name, body, variables FROM {$this->table} WHERE tenant_id = ? AND status = 'active' ORDER BY name",
+            [$tenantId]
+        )->fetchAll();
     }
 }

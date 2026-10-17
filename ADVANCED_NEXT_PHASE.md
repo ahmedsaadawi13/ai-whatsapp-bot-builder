@@ -1,5 +1,7 @@
 # Advanced Next Phase - AI WhatsApp Bot Builder
 
+> **Status (updated):** several items below are now **implemented**: outgoing webhooks with retries and signatures, broadcast scheduling via cron, usage-based quota enforcement, analytics reports with CSV export, encrypted channel credentials, login throttling, and the automated test suite (`php tests/run.php`). See [CODE_REVIEW.md](CODE_REVIEW.md) for the current state. Items that are still roadmap: real LLM / WhatsApp provider integrations, queue workers, WebSockets, a drag-and-drop flow designer, multi-channel (Telegram/Messenger), SSO/2FA, white-label, mobile apps. The cost and effort figures below are rough planning estimates, not quotes.
+
 ## 🚀 Phase 2: Enterprise & Advanced Features
 
 Based on the comprehensive code review and current implementation, here are the recommended advanced features for the next development phase:

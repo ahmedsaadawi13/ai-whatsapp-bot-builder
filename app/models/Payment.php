@@ -2,47 +2,57 @@
 // FILE: /app/models/Payment.php
 
 /**
- * Payment Model
+ * Payment Model - dummy payment gateway.
  *
- * Handles payment transactions.
+ * processPayment() simulates a card charge. A card number ending in "0002"
+ * simulates a decline so the failure path can be tested.
  */
 class Payment extends Model {
 
     protected $table = 'payments';
 
     /**
-     * Process payment (dummy implementation)
-     *
-     * @param int $tenantId
-     * @param int|null $invoiceId
-     * @param float $amount
-     * @param string $paymentMethod
-     * @return array Payment result
+     * @return array ['success' => bool, 'transaction_id' => string|null, 'message' => string]
      */
-    public function processPayment($tenantId, $invoiceId, $amount, $paymentMethod = 'credit_card') {
-        // Simulate payment processing
-        $transactionId = 'txn_' . uniqid() . time();
+    public function processPayment($tenantId, $invoice, $method = 'credit_card', $cardNumber = '') {
+        $declined = substr(preg_replace('/\D/', '', (string) $cardNumber), -4) === '0002';
+        $transactionId = 'txn_' . bin2hex(random_bytes(8));
 
-        $paymentId = $this->create([
-            'tenant_id' => $tenantId,
-            'invoice_id' => $invoiceId,
-            'amount' => $amount,
-            'payment_method' => $paymentMethod,
-            'transaction_id' => $transactionId,
-            'status' => 'completed'
-        ]);
+        $this->beginTransaction();
+        try {
+            $this->create([
+                'tenant_id' => $tenantId,
+                'invoice_id' => $invoice['id'],
+                'amount' => $invoice['total'],
+                'payment_method' => $method,
+                'transaction_id' => $transactionId,
+                'status' => $declined ? 'failed' : 'completed',
+                'notes' => $declined ? 'Simulated decline (test card ending 0002)' : 'Simulated payment (dummy gateway)'
+            ]);
 
-        // Update invoice if provided
-        if ($invoiceId) {
-            require_once __DIR__ . '/Invoice.php';
-            $invoiceModel = new Invoice();
-            $invoiceModel->markAsPaid($invoiceId, $tenantId);
+            if (!$declined) {
+                (new Invoice())->markAsPaid($invoice['id'], $tenantId);
+                if (!empty($invoice['subscription_id']) && !empty($invoice['period_end'])) {
+                    (new Subscription())->extendTo($invoice['subscription_id'], $tenantId, $invoice['period_end'] . ' 23:59:59');
+                }
+            }
+            $this->commit();
+        } catch (Exception $e) {
+            $this->rollback();
+            throw $e;
         }
 
         return [
-            'success' => true,
-            'payment_id' => $paymentId,
-            'transaction_id' => $transactionId
+            'success' => !$declined,
+            'transaction_id' => $transactionId,
+            'message' => $declined ? 'Payment declined by the (simulated) bank' : 'Payment successful'
         ];
+    }
+
+    public function getHistory($tenantId, $limit = 20) {
+        $sql = "SELECT p.*, i.invoice_number FROM {$this->table} p
+                LEFT JOIN invoices i ON i.id = p.invoice_id
+                WHERE p.tenant_id = ? ORDER BY p.id DESC " . $this->limitClause($limit);
+        return $this->query($sql, [$tenantId])->fetchAll();
     }
 }

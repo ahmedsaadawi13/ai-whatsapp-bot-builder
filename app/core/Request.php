@@ -142,17 +142,24 @@ class Request {
     }
 
     /**
-     * Get client IP address
+     * Client IP address.
+     *
+     * X-Forwarded-For is only honoured when the direct peer is listed in
+     * TRUSTED_PROXIES (comma-separated IPs in .env); otherwise it could be
+     * spoofed by any client.
      *
      * @return string
      */
     public function ip() {
-        if (!empty($_SERVER['HTTP_CLIENT_IP'])) {
-            return $_SERVER['HTTP_CLIENT_IP'];
-        } elseif (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
-            return $_SERVER['HTTP_X_FORWARDED_FOR'];
+        $remote = isset($_SERVER['REMOTE_ADDR']) ? $_SERVER['REMOTE_ADDR'] : '0.0.0.0';
+        $trusted = array_filter(array_map('trim', explode(',', (string) getenv('TRUSTED_PROXIES'))));
+        if (in_array($remote, $trusted, true) && !empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
+            $forwarded = trim(explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0]);
+            if (filter_var($forwarded, FILTER_VALIDATE_IP)) {
+                return $forwarded;
+            }
         }
-        return $_SERVER['REMOTE_ADDR'];
+        return $remote;
     }
 
     /**

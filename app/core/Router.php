@@ -86,7 +86,8 @@ class Router {
         $params = [];
 
         // Convert pattern to regex
-        $regex = preg_replace('/\{([a-zA-Z0-9_]+)\}/', '([^/]+)', $pattern);
+        // Route parameters ({id}, {botId}, ...) only match numeric IDs.
+        $regex = preg_replace('/\{([a-zA-Z0-9_]+)\}/', '([0-9]+)', $pattern);
         $regex = '#^' . $regex . '$#';
 
         if (preg_match($regex, $uri, $matches)) {
@@ -135,8 +136,8 @@ class Router {
             throw new Exception("Method not found: {$controllerName}@{$method}");
         }
 
-        // Call controller method with params
-        call_user_func_array([$controller, $method], $params);
+        // Call controller method with params (positional order)
+        call_user_func_array([$controller, $method], array_values($params));
     }
 
     /**
@@ -144,7 +145,13 @@ class Router {
      */
     private function handleNotFound() {
         http_response_code(404);
-        echo '<h1>404 - Page Not Found</h1>';
+        if (strpos(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH), '/api/') === 0) {
+            header('Content-Type: application/json');
+            echo json_encode(['error' => 'Endpoint not found']);
+            exit;
+        }
+        $view = new View();
+        $view->render('errors/error', ['title' => 'Page not found', 'code' => 404, 'message' => 'Page not found'], 'layout');
         exit;
     }
 }

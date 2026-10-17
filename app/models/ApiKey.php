@@ -2,76 +2,56 @@
 // FILE: /app/models/ApiKey.php
 
 /**
- * ApiKey Model
+ * ApiKey Model - per-tenant keys for the public API.
  *
- * Handles API key management for public API access.
+ * Only a SHA-256 hash is stored. API keys are long random strings, so a
+ * fast hash is appropriate and allows a direct indexed lookup.
  */
 class ApiKey extends Model {
 
     protected $table = 'api_keys';
 
     /**
-     * Generate new API key
-     *
-     * @param int $tenantId
-     * @param string $name
-     * @return array ['key' => raw key, 'id' => key ID]
+     * @return array ['key' => raw key (show once), 'id' => int]
      */
     public function generate($tenantId, $name) {
-        // Generate random API key
-        $rawKey = bin2hex(random_bytes(32));
-        $keyPrefix = substr($rawKey, 0, 8);
-        $keyHash = password_hash($rawKey, PASSWORD_DEFAULT);
-
-        $keyId = $this->create([
+        $rawKey = 'awb_' . bin2hex(random_bytes(24));
+        $id = $this->create([
             'tenant_id' => $tenantId,
             'name' => $name,
-            'key_hash' => $keyHash,
-            'key_prefix' => $keyPrefix,
+            'key_hash' => hash('sha256', $rawKey),
+            'key_prefix' => substr($rawKey, 0, 12),
             'status' => 'active'
         ]);
-
-        return [
-            'key' => $rawKey,
-            'id' => $keyId
-        ];
+        return ['key' => $rawKey, 'id' => $id];
     }
 
     /**
-     * Validate API key and return tenant
-     *
-     * @param string $rawKey
-     * @return array|null Tenant data if valid
+     * Validate a raw key. Returns the key row (with tenant info) or null.
      */
     public function validateKey($rawKey) {
-        $keyPrefix = substr($rawKey, 0, 8);
-
-        $sql = "SELECT ak.*, t.id as tenant_id, t.name as tenant_name, t.status as tenant_status
-                FROM {$this->table} ak
-                JOIN tenants t ON ak.tenant_id = t.id
-                WHERE ak.key_prefix = ? AND ak.status = 'active' AND t.status = 'active'
-                LIMIT 1";
-        $stmt = $this->query($sql, [$keyPrefix]);
-        $apiKey = $stmt->fetch();
-
-        if (!$apiKey || !password_verify($rawKey, $apiKey['key_hash'])) {
+        if (!is_string($rawKey) || strlen($rawKey) < 20 || strlen($rawKey) > 200) {
             return null;
         }
-
-        // Update last used timestamp
-        $this->query("UPDATE {$this->table} SET last_used_at = NOW() WHERE id = ?", [$apiKey['id']]);
-
+        $sql = "SELECT ak.*, t.name AS tenant_name
+                FROM {$this->table} ak
+                JOIN tenants t ON ak.tenant_id = t.id
+                WHERE ak.key_hash = ? AND ak.status = 'active' AND t.status = 'active'
+                  AND (ak.expires_at IS NULL OR ak.expires_at > ?)
+                LIMIT 1";
+        $apiKey = $this->query($sql, [hash('sha256', $rawKey), date('Y-m-d H:i:s')])->fetch();
+        if (!$apiKey) {
+            return null;
+        }
+        $this->query("UPDATE {$this->table} SET last_used_at = ? WHERE id = ?", [date('Y-m-d H:i:s'), $apiKey['id']]);
         return $apiKey;
     }
 
-    /**
-     * Revoke API key
-     *
-     * @param int $id
-     * @param int $tenantId
-     * @return bool
-     */
     public function revoke($id, $tenantId) {
-        return $this->update($id, ['status' => 'revoked'], $tenantId);
+        $stmt = $this->query(
+            "UPDATE {$this->table} SET status = 'revoked', updated_at = ? WHERE id = ? AND tenant_id = ?",
+            [date('Y-m-d H:i:s'), $id, $tenantId]
+        );
+        return $stmt->rowCount() > 0;
     }
 }

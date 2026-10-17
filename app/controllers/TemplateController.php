@@ -1,78 +1,109 @@
 <?php
 // FILE: /app/controllers/TemplateController.php
 
+/**
+ * Template Controller - message templates with {{placeholders}}.
+ */
 class TemplateController extends Controller {
+
+    const LANGUAGES = ['en', 'ar', 'es', 'fr', 'de', 'pt'];
+
     public function index() {
-        $this->requireAuth();
-        require_once __DIR__ . '/../models/Template.php';
+        $tenantId = $this->requireTenant(self::BUILDER_ROLES);
         $model = new Template();
-        $templates = $model->findAll([], $this->getTenantId());
-        $this->view('templates/index', ['title' => 'Templates', 'templates' => $templates]);
+        $filters = [
+            'category' => in_array($this->request->get('category'), Template::CATEGORIES, true) ? $this->request->get('category') : null,
+            'status' => in_array($this->request->get('status'), ['active', 'inactive'], true) ? $this->request->get('status') : null
+        ];
+        $search = $this->request->get('search');
+        $pagination = $this->getPagination($model->count($filters, $tenantId, $search));
+
+        $this->view('templates/index', [
+            'title' => 'Message Templates',
+            'templates' => $model->findAll($filters, $tenantId, $pagination['per_page'], $pagination['offset'], $search),
+            'pagination' => $pagination,
+            'filters' => $filters + ['search' => $search],
+            'categories' => Template::CATEGORIES
+        ]);
     }
 
     public function create() {
-        $this->requireAuth();
-        $this->view('templates/create', ['title' => 'Create Template']);
+        $this->requireTenant(self::BUILDER_ROLES);
+        $this->view('templates/create', ['title' => 'Create Template', 'categories' => Template::CATEGORIES, 'languages' => self::LANGUAGES]);
     }
 
     public function store() {
-        $this->requireAuth();
+        $tenantId = $this->requireTenant(self::BUILDER_ROLES);
         $this->requireCsrf();
-        require_once __DIR__ . '/../models/Template.php';
-        $model = new Template();
-        $model->create([
-            'tenant_id' => $this->getTenantId(),
-            'name' => $this->request->post('name'),
-            'category' => $this->request->post('category'),
-            'language' => $this->request->post('language', 'en'),
-            'header' => $this->request->post('header'),
-            'body' => $this->request->post('body'),
-            'footer' => $this->request->post('footer'),
-            'variables' => $this->request->post('variables'),
-            'status' => 'active'
-        ]);
-        $this->session->flash('success', 'Template created successfully');
+        $data = $this->collect();
+        $errors = $this->validateTemplate($data);
+        if (!empty($errors)) {
+            $this->failValidation($errors);
+        }
+        (new Template())->create($data + ['tenant_id' => $tenantId]);
+        $this->session->flash('success', 'Template created');
         $this->redirect('/templates');
     }
 
     public function edit($id) {
-        $this->requireAuth();
-        require_once __DIR__ . '/../models/Template.php';
-        $model = new Template();
-        $template = $model->find($id, $this->getTenantId());
-        if (!$template) {
-            $this->session->flash('error', 'Template not found');
-            $this->redirect('/templates');
-        }
-        $this->view('templates/edit', ['title' => 'Edit Template', 'template' => $template]);
+        $tenantId = $this->requireTenant(self::BUILDER_ROLES);
+        $this->view('templates/edit', [
+            'title' => 'Edit Template',
+            'template' => $this->findOwned(new Template(), $id, $tenantId),
+            'categories' => Template::CATEGORIES,
+            'languages' => self::LANGUAGES
+        ]);
     }
 
     public function update($id) {
-        $this->requireAuth();
+        $tenantId = $this->requireTenant(self::BUILDER_ROLES);
         $this->requireCsrf();
-        require_once __DIR__ . '/../models/Template.php';
         $model = new Template();
-        $model->update($id, [
-            'name' => $this->request->post('name'),
-            'category' => $this->request->post('category'),
-            'language' => $this->request->post('language'),
-            'header' => $this->request->post('header'),
-            'body' => $this->request->post('body'),
-            'footer' => $this->request->post('footer'),
-            'variables' => $this->request->post('variables'),
-            'status' => $this->request->post('status')
-        ], $this->getTenantId());
-        $this->session->flash('success', 'Template updated successfully');
+        $template = $this->findOwned($model, $id, $tenantId);
+        $data = $this->collect();
+        $errors = $this->validateTemplate($data);
+        if (!empty($errors)) {
+            $this->failValidation($errors);
+        }
+        $model->update($template['id'], $data, $tenantId);
+        $this->session->flash('success', 'Template updated');
         $this->redirect('/templates');
     }
 
     public function delete($id) {
-        $this->requireAuth();
+        $tenantId = $this->requireTenant(self::BUILDER_ROLES);
         $this->requireCsrf();
-        require_once __DIR__ . '/../models/Template.php';
         $model = new Template();
-        $model->delete($id, $this->getTenantId());
-        $this->session->flash('success', 'Template deleted successfully');
+        $template = $this->findOwned($model, $id, $tenantId);
+        $model->delete($template['id'], $tenantId);
+        $this->session->flash('success', 'Template deleted');
         $this->redirect('/templates');
+    }
+
+    private function collect() {
+        $data = [
+            'name' => $this->request->post('name'),
+            'category' => $this->request->post('category'),
+            'language' => $this->request->post('language', 'en'),
+            'header' => $this->request->post('header') ?: null,
+            'body' => $this->request->post('body'),
+            'footer' => $this->request->post('footer') ?: null,
+            'status' => $this->request->post('status', 'active')
+        ];
+        // Placeholders are detected automatically from header/body/footer.
+        $data['variables'] = json_encode(Template::extractVariables($data['header'] . ' ' . $data['body'] . ' ' . $data['footer']));
+        return $data;
+    }
+
+    private function validateTemplate($data) {
+        return $this->validate($data, [
+            'name' => 'required|min:2|max:255',
+            'category' => 'required|in:' . implode(',', Template::CATEGORIES),
+            'language' => 'required|in:' . implode(',', self::LANGUAGES),
+            'header' => 'max:255',
+            'body' => 'required|max:4096',
+            'footer' => 'max:255',
+            'status' => 'required|in:active,inactive'
+        ]);
     }
 }

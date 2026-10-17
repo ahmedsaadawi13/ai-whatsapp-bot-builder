@@ -52,7 +52,7 @@ class View {
      * @return string
      */
     public static function e($value) {
-        return htmlspecialchars($value, ENT_QUOTES, 'UTF-8');
+        return htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8');
     }
 
     /**

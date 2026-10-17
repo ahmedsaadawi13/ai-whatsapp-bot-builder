@@ -2,71 +2,54 @@
 // FILE: /public/index.php
 
 /**
- * Application Entry Point
+ * AI WhatsApp Bot Builder - Front Controller
  *
- * This file bootstraps the application and handles all incoming requests.
+ * Every HTTP request enters here, is routed to a controller method,
+ * and exceptions are converted into friendly error pages / JSON.
  */
 
-// Enable error reporting in development
+require_once __DIR__ . '/../app/bootstrap.php';
+
 error_reporting(E_ALL);
-ini_set('display_errors', '1');
+ini_set('display_errors', app_debug() ? '1' : '0');
+ini_set('log_errors', '1');
 
-// Set default timezone
-date_default_timezone_set('UTC');
+// Basic security headers for every response
+header('X-Frame-Options: SAMEORIGIN');
+header('X-Content-Type-Options: nosniff');
+header('Referrer-Policy: strict-origin-when-cross-origin');
+header_remove('X-Powered-By');
 
-// Load environment variables from .env if it exists
-$envFile = __DIR__ . '/../.env';
-if (file_exists($envFile)) {
-    $lines = file($envFile, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-    foreach ($lines as $line) {
-        if (strpos($line, '#') === 0) continue;
-        list($key, $value) = explode('=', $line, 2);
-        putenv(trim($key) . '=' . trim($value));
-    }
-}
-
-// Load core classes
-require_once __DIR__ . '/../app/core/Database.php';
-require_once __DIR__ . '/../app/core/Model.php';
-require_once __DIR__ . '/../app/core/Controller.php';
-require_once __DIR__ . '/../app/core/View.php';
-require_once __DIR__ . '/../app/core/Router.php';
-require_once __DIR__ . '/../app/core/Request.php';
-require_once __DIR__ . '/../app/core/Session.php';
-require_once __DIR__ . '/../app/core/Auth.php';
-require_once __DIR__ . '/../app/core/CSRF.php';
-require_once __DIR__ . '/../app/core/Validator.php';
-require_once __DIR__ . '/../app/core/FileUpload.php';
-
-// Initialize router
 $router = new Router();
 
 // ===================================================================
-// PUBLIC ROUTES (No authentication required)
+// PUBLIC ROUTES
 // ===================================================================
-
 $router->get('/', 'HomeController@index');
 $router->get('/login', 'AuthController@showLogin');
 $router->post('/login', 'AuthController@login');
 $router->get('/register', 'AuthController@showRegister');
 $router->post('/register', 'AuthController@register');
+$router->post('/logout', 'AuthController@logout');
 $router->get('/logout', 'AuthController@logout');
 
 // ===================================================================
-// API ROUTES (Public API with API key authentication)
+// PUBLIC API (X-API-KEY / webhook token authentication)
 // ===================================================================
-
 $router->post('/api/v1/send-message', 'ApiController@sendMessage');
+$router->get('/api/v1/bots', 'ApiController@listBots');
+$router->get('/api/v1/conversations/{id}', 'ApiController@getConversation');
+$router->get('/api/v1/webhook', 'ApiController@verifyWebhook');
 $router->post('/api/v1/webhook', 'ApiController@webhook');
 
 // ===================================================================
 // AUTHENTICATED ROUTES
 // ===================================================================
-
-// Dashboard
 $router->get('/dashboard', 'DashboardController@index');
+$router->get('/notifications', 'NotificationController@index');
+$router->get('/files', 'FileController@serve');
 
-// Tenants (Platform Admin only)
+// Tenants (platform admin)
 $router->get('/tenants', 'TenantController@index');
 $router->get('/tenants/create', 'TenantController@create');
 $router->post('/tenants/store', 'TenantController@store');
@@ -83,7 +66,7 @@ $router->get('/users/{id}/edit', 'UserController@edit');
 $router->post('/users/{id}/update', 'UserController@update');
 $router->post('/users/{id}/delete', 'UserController@delete');
 
-// Channels (WhatsApp Numbers)
+// Channels
 $router->get('/channels', 'ChannelController@index');
 $router->get('/channels/create', 'ChannelController@create');
 $router->post('/channels/store', 'ChannelController@store');
@@ -100,6 +83,7 @@ $router->get('/bots/{id}/edit', 'BotController@edit');
 $router->post('/bots/{id}/update', 'BotController@update');
 $router->post('/bots/{id}/delete', 'BotController@delete');
 $router->post('/bots/{id}/toggle-status', 'BotController@toggleStatus');
+$router->post('/bots/{id}/simulate', 'BotController@simulate');
 
 // Flows
 $router->get('/bots/{botId}/flows', 'FlowController@index');
@@ -109,18 +93,21 @@ $router->get('/flows/{id}/edit', 'FlowController@edit');
 $router->post('/flows/{id}/update', 'FlowController@update');
 $router->post('/flows/{id}/delete', 'FlowController@delete');
 
-// Flow Steps
+// Flow steps
 $router->get('/flows/{flowId}/steps', 'FlowStepController@index');
 $router->get('/flows/{flowId}/steps/create', 'FlowStepController@create');
 $router->post('/flows/{flowId}/steps/store', 'FlowStepController@store');
 $router->get('/steps/{id}/edit', 'FlowStepController@edit');
 $router->post('/steps/{id}/update', 'FlowStepController@update');
 $router->post('/steps/{id}/delete', 'FlowStepController@delete');
+$router->post('/steps/{id}/move-up', 'FlowStepController@moveUp');
+$router->post('/steps/{id}/move-down', 'FlowStepController@moveDown');
 
-// Knowledge Base
+// Knowledge base
 $router->get('/knowledge-base', 'KnowledgeBaseController@index');
 $router->get('/knowledge-base/create', 'KnowledgeBaseController@create');
 $router->post('/knowledge-base/store', 'KnowledgeBaseController@store');
+$router->post('/knowledge-base/upload', 'KnowledgeBaseController@upload');
 $router->get('/knowledge-base/{id}/edit', 'KnowledgeBaseController@edit');
 $router->post('/knowledge-base/{id}/update', 'KnowledgeBaseController@update');
 $router->post('/knowledge-base/{id}/delete', 'KnowledgeBaseController@delete');
@@ -129,16 +116,19 @@ $router->post('/knowledge-base/{id}/delete', 'KnowledgeBaseController@delete');
 $router->get('/contacts', 'ContactController@index');
 $router->get('/contacts/create', 'ContactController@create');
 $router->post('/contacts/store', 'ContactController@store');
+$router->post('/contacts/import', 'ContactController@import');
 $router->get('/contacts/{id}', 'ContactController@show');
 $router->get('/contacts/{id}/edit', 'ContactController@edit');
 $router->post('/contacts/{id}/update', 'ContactController@update');
 $router->post('/contacts/{id}/delete', 'ContactController@delete');
-$router->post('/contacts/import', 'ContactController@import');
 
-// Conversations & Inbox
+// Inbox & conversations
 $router->get('/inbox', 'InboxController@index');
 $router->get('/conversations/{id}', 'ConversationController@show');
 $router->post('/conversations/{id}/send-message', 'ConversationController@sendMessage');
+$router->post('/conversations/{id}/rewrite', 'ConversationController@rewrite');
+$router->post('/conversations/{id}/assign', 'ConversationController@assign');
+$router->post('/conversations/{id}/status', 'ConversationController@setStatus');
 $router->post('/conversations/{id}/close', 'ConversationController@close');
 $router->post('/conversations/{id}/reopen', 'ConversationController@reopen');
 
@@ -155,6 +145,8 @@ $router->get('/broadcasts', 'BroadcastController@index');
 $router->get('/broadcasts/create', 'BroadcastController@create');
 $router->post('/broadcasts/store', 'BroadcastController@store');
 $router->get('/broadcasts/{id}', 'BroadcastController@show');
+$router->post('/broadcasts/{id}/send', 'BroadcastController@send');
+$router->post('/broadcasts/{id}/cancel', 'BroadcastController@cancel');
 $router->post('/broadcasts/{id}/delete', 'BroadcastController@delete');
 
 // Webhooks
@@ -164,14 +156,17 @@ $router->post('/webhooks/store', 'WebhookController@store');
 $router->get('/webhooks/{id}/edit', 'WebhookController@edit');
 $router->post('/webhooks/{id}/update', 'WebhookController@update');
 $router->post('/webhooks/{id}/delete', 'WebhookController@delete');
+$router->post('/webhooks/{id}/test', 'WebhookController@test');
 $router->get('/webhooks/{id}/logs', 'WebhookController@logs');
 
-// Analytics
+// Analytics & reports
 $router->get('/analytics', 'AnalyticsController@index');
 $router->get('/analytics/messages', 'AnalyticsController@messages');
 $router->get('/analytics/conversations', 'AnalyticsController@conversations');
+$router->get('/analytics/channels', 'AnalyticsController@channels');
+$router->get('/analytics/broadcasts', 'AnalyticsController@broadcasts');
 
-// Subscription & Billing
+// Subscription & billing
 $router->get('/subscription', 'SubscriptionController@index');
 $router->get('/subscription/plans', 'SubscriptionController@plans');
 $router->post('/subscription/change-plan', 'SubscriptionController@changePlan');
@@ -179,24 +174,29 @@ $router->get('/billing', 'BillingController@index');
 $router->get('/billing/invoices/{id}', 'BillingController@showInvoice');
 $router->post('/billing/pay-invoice', 'BillingController@payInvoice');
 
-// Settings
+// Settings & API keys
 $router->get('/settings', 'SettingsController@index');
 $router->post('/settings/update', 'SettingsController@update');
+$router->post('/settings/logo', 'SettingsController@uploadLogo');
 $router->get('/settings/api-keys', 'SettingsController@apiKeys');
 $router->post('/settings/generate-api-key', 'SettingsController@generateApiKey');
 $router->post('/settings/revoke-api-key', 'SettingsController@revokeApiKey');
 
-// Dispatch request
 try {
     $router->dispatch();
-} catch (Exception $e) {
-    // Handle exceptions
-    http_response_code(500);
-    if (getenv('APP_DEBUG') === 'true') {
-        echo '<h1>Error</h1>';
-        echo '<p>' . htmlspecialchars($e->getMessage()) . '</p>';
-        echo '<pre>' . htmlspecialchars($e->getTraceAsString()) . '</pre>';
+} catch (Throwable $e) {
+    error_log('[AI WhatsApp Bot Builder] ' . get_class($e) . ': ' . $e->getMessage() . ' in ' . $e->getFile() . ':' . $e->getLine());
+    if (!headers_sent()) {
+        http_response_code(500);
+    }
+
+    $isApi = strpos(parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH), '/api/') === 0;
+    if ($isApi) {
+        header('Content-Type: application/json');
+        echo json_encode(['error' => 'Internal server error'] + (app_debug() ? ['detail' => $e->getMessage()] : []));
+    } elseif (app_debug()) {
+        echo '<h1>Error</h1><p>' . e($e->getMessage()) . '</p><pre>' . e($e->getTraceAsString()) . '</pre>';
     } else {
-        echo '<h1>500 - Internal Server Error</h1>';
+        echo '<h1>500 - Internal Server Error</h1><p>Something went wrong. Please try again later.</p>';
     }
 }

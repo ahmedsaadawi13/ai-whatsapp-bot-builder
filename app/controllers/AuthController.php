@@ -2,133 +2,93 @@
 // FILE: /app/controllers/AuthController.php
 
 /**
- * Auth Controller
- *
- * Handles user authentication (login, register, logout).
+ * Auth Controller - login, tenant self-registration, logout.
  */
 class AuthController extends Controller {
 
-    /**
-     * Show login form
-     */
     public function showLogin() {
         if ($this->isAuthenticated()) {
             $this->redirect('/dashboard');
         }
-
-        $this->view('auth/login', [
-            'title' => 'Login'
-        ], null);
+        $this->view('auth/login', ['title' => 'Login'], null);
     }
 
-    /**
-     * Process login
-     */
     public function login() {
-        if (!$this->request->isPost()) {
+        $this->requireCsrf();
+
+        $email = (string) $this->request->post('email', '');
+        $password = isset($_POST['password']) ? (string) $_POST['password'] : '';
+
+        if ($email === '' || $password === '' || !filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            $this->session->flash('error', 'Please enter a valid email and password');
+            $this->session->set('_old_input', ['email' => $email]);
             $this->redirect('/login');
         }
 
-        $email = $this->request->post('email');
-        $password = $this->request->post('password');
-
-        // Validate
-        $errors = $this->validate([
-            'email' => $email,
-            'password' => $password
-        ], [
-            'email' => 'required|email',
-            'password' => 'required'
-        ]);
-
-        if (!empty($errors)) {
-            $this->session->flash('error', 'Please provide valid credentials');
-            $this->redirect('/login');
-        }
-
-        // Attempt login
-        if ($this->auth->attempt($email, $password)) {
+        if ($this->auth->attempt($email, $password, $this->request->ip())) {
             $this->session->flash('success', 'Welcome back!');
             $this->redirect('/dashboard');
-        } else {
-            $this->session->flash('error', 'Invalid email or password');
-            $this->redirect('/login');
         }
+
+        $this->session->flash('error', $this->auth->getLastError());
+        $this->session->set('_old_input', ['email' => $email]);
+        $this->redirect('/login');
     }
 
-    /**
-     * Show registration form
-     */
     public function showRegister() {
         if ($this->isAuthenticated()) {
             $this->redirect('/dashboard');
         }
-
-        // Load plans
-        require_once __DIR__ . '/../models/Plan.php';
-        $planModel = new Plan();
-        $plans = $planModel->getActivePlans();
-
         $this->view('auth/register', [
             'title' => 'Register',
-            'plans' => $plans
+            'plans' => (new Plan())->getActivePlans()
         ], null);
     }
 
     /**
-     * Process registration
+     * Self-service signup: creates tenant + tenant_admin + subscription + first invoice.
      */
     public function register() {
-        if (!$this->request->isPost()) {
-            $this->redirect('/register');
-        }
+        $this->requireCsrf();
 
         $data = [
             'name' => $this->request->post('name'),
-            'email' => $this->request->post('email'),
-            'password' => $this->request->post('password'),
-            'password_confirmation' => $this->request->post('password_confirmation'),
+            'email' => strtolower((string) $this->request->post('email')),
+            'password' => isset($_POST['password']) ? (string) $_POST['password'] : '',
+            'password_confirmation' => isset($_POST['password_confirmation']) ? (string) $_POST['password_confirmation'] : '',
             'tenant_name' => $this->request->post('tenant_name'),
-            'plan_id' => $this->request->post('plan_id', 1)
+            'plan_id' => $this->request->post('plan_id')
         ];
 
-        // Validate
         $errors = $this->validate($data, [
-            'name' => 'required|min:2',
-            'email' => 'required|email|unique:users,email',
-            'password' => 'required|min:6|confirmed',
-            'tenant_name' => 'required|min:2'
+            'tenant_name' => 'required|min:2|max:255',
+            'name' => 'required|min:2|max:255',
+            'email' => 'required|email|max:255|unique:users,email',
+            'password' => 'required|min:8|max:255|confirmed',
+            'plan_id' => 'required|integer'
         ]);
 
+        $plan = (new Plan())->findActive($data['plan_id']);
+        if (!$plan) {
+            $errors['plan_id'][] = 'Please choose a valid plan';
+        }
         if (!empty($errors)) {
-            $this->session->flash('error', 'Please fix the errors and try again');
-            $this->session->flash('errors', $errors);
-            $this->redirect('/register');
+            $this->failValidation($errors, '/register');
         }
 
-        // Create tenant and user
-        require_once __DIR__ . '/../models/Tenant.php';
-        require_once __DIR__ . '/../models/User.php';
-        require_once __DIR__ . '/../models/Subscription.php';
-
         $tenantModel = new Tenant();
-        $userModel = new User();
-        $subscriptionModel = new Subscription();
-
         try {
             $tenantModel->beginTransaction();
 
-            // Create tenant
-            $slug = $tenantModel->generateSlug($data['tenant_name']);
             $tenantId = $tenantModel->create([
                 'name' => $data['tenant_name'],
-                'slug' => $slug,
+                'slug' => $tenantModel->generateSlug($data['tenant_name']),
                 'email' => $data['email'],
+                'timezone' => 'UTC',
                 'status' => 'active'
             ]);
 
-            // Create user
-            $userId = $userModel->createUser([
+            $userId = (new User())->createUser([
                 'tenant_id' => $tenantId,
                 'name' => $data['name'],
                 'email' => $data['email'],
@@ -137,34 +97,25 @@ class AuthController extends Controller {
                 'status' => 'active'
             ]);
 
-            // Create subscription
-            $subscriptionModel->create([
-                'tenant_id' => $tenantId,
-                'plan_id' => $data['plan_id'],
-                'status' => 'active',
-                'started_at' => date('Y-m-d H:i:s'),
-                'expires_at' => date('Y-m-d H:i:s', strtotime('+1 month'))
-            ]);
-
             $tenantModel->commit();
-
-            // Login user
-            $user = $userModel->find($userId);
-            $this->auth->login($user);
-
-            $this->session->flash('success', 'Registration successful! Welcome to AI WhatsApp Bot Builder');
-            $this->redirect('/dashboard');
-
         } catch (Exception $e) {
             $tenantModel->rollback();
+            error_log('Registration failed: ' . $e->getMessage());
             $this->session->flash('error', 'Registration failed. Please try again.');
             $this->redirect('/register');
         }
+
+        (new Subscription())->switchPlan($tenantId, $plan);
+
+        $tenant = $tenantModel->find($tenantId);
+        $user = (new User())->find($userId);
+        Notifier::welcome($tenant, $user);
+
+        $this->auth->login($user);
+        $this->session->flash('success', 'Welcome to AI WhatsApp Bot Builder! Your first invoice is waiting under Billing.');
+        $this->redirect('/dashboard');
     }
 
-    /**
-     * Logout
-     */
     public function logout() {
         $this->auth->logout();
         $this->session->flash('success', 'You have been logged out');

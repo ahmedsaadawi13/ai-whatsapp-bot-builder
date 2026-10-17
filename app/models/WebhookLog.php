@@ -2,186 +2,52 @@
 // FILE: /app/models/WebhookLog.php
 
 /**
- * WebhookLog Model
+ * WebhookLog Model - delivery attempts of outgoing webhooks.
  *
- * Handles webhook execution logs.
+ * No tenant_id column: reads join webhooks to enforce the tenant.
  */
 class WebhookLog extends Model {
 
     protected $table = 'webhook_logs';
+    protected $tenantScoped = false;
+    protected $hasUpdatedAt = false;
 
-    /**
-     * Get logs by webhook (with optional tenant isolation)
-     *
-     * @param int $webhookId
-     * @param int $limit
-     * @param int $offset
-     * @param int|null $tenantId Optional tenant ID for isolation
-     * @return array
-     */
-    public function getByWebhook($webhookId, $limit = 100, $offset = 0, $tenantId = null) {
-        if ($tenantId === null) {
-            // No tenant filtering (backward compatibility)
-            $sql = "SELECT * FROM {$this->table}
-                    WHERE webhook_id = ?
-                    ORDER BY id DESC
-                    LIMIT ? OFFSET ?";
-            $stmt = $this->query($sql, [$webhookId, (int)$limit, (int)$offset]);
-        } else {
-            // Enforce tenant isolation via JOIN
-            $sql = "SELECT wl.* FROM {$this->table} wl
-                    JOIN webhooks w ON wl.webhook_id = w.id
-                    WHERE wl.webhook_id = ? AND w.tenant_id = ?
-                    ORDER BY wl.id DESC
-                    LIMIT ? OFFSET ?";
-            $stmt = $this->query($sql, [$webhookId, $tenantId, (int)$limit, (int)$offset]);
-        }
-        return $stmt->fetchAll();
+    public function getByWebhook($webhookId, $tenantId, $status = null, $limit = 50, $offset = 0) {
+        list($where, $params) = $this->logWhere($webhookId, $tenantId, $status);
+        $sql = "SELECT l.* FROM {$this->table} l
+                JOIN webhooks w ON w.id = l.webhook_id
+                WHERE {$where}
+                ORDER BY l.id DESC " . $this->limitClause($limit, $offset);
+        return $this->query($sql, $params)->fetchAll();
     }
 
-    /**
-     * Override find to enforce tenant isolation via webhook
-     *
-     * @param int $id
-     * @param int|null $tenantId
-     * @return array|null
-     */
-    public function find($id, $tenantId = null) {
-        if ($tenantId === null) {
-            return parent::find($id, null);
-        }
-
-        $sql = "SELECT wl.* FROM {$this->table} wl
-                JOIN webhooks w ON wl.webhook_id = w.id
-                WHERE wl.id = ? AND w.tenant_id = ?
-                LIMIT 1";
-        $stmt = $this->query($sql, [$id, $tenantId]);
-        return $stmt->fetch() ?: null;
+    public function countByWebhook($webhookId, $tenantId, $status = null) {
+        list($where, $params) = $this->logWhere($webhookId, $tenantId, $status);
+        $sql = "SELECT COUNT(*) AS total FROM {$this->table} l JOIN webhooks w ON w.id = l.webhook_id WHERE {$where}";
+        return (int) $this->query($sql, $params)->fetch()['total'];
     }
 
-    /**
-     * Override findAll to enforce tenant isolation via webhook
-     *
-     * @param array $filters
-     * @param int|null $tenantId
-     * @param int $limit
-     * @param int $offset
-     * @return array
-     */
-    public function findAll($filters = [], $tenantId = null, $limit = 100, $offset = 0) {
-        if ($tenantId === null) {
-            return parent::findAll($filters, null, $limit, $offset);
+    private function logWhere($webhookId, $tenantId, $status) {
+        $where = 'l.webhook_id = ? AND w.tenant_id = ?';
+        $params = [$webhookId, $tenantId];
+        if ($status === 'success' || $status === 'failed') {
+            $where .= ' AND l.status = ?';
+            $params[] = $status;
         }
-
-        $sql = "SELECT wl.* FROM {$this->table} wl
-                JOIN webhooks w ON wl.webhook_id = w.id
-                WHERE w.tenant_id = ?";
-        $params = [$tenantId];
-
-        foreach ($filters as $key => $value) {
-            if ($value !== null && $this->isValidColumn($key)) {
-                $sql .= " AND wl.{$key} = ?";
-                $params[] = $value;
-            }
-        }
-
-        $sql .= " ORDER BY wl.id DESC LIMIT ? OFFSET ?";
-        $params[] = (int)$limit;
-        $params[] = (int)$offset;
-
-        $stmt = $this->query($sql, $params);
-        return $stmt->fetchAll();
+        return [$where, $params];
     }
 
-    /**
-     * Override count to enforce tenant isolation via webhook
-     *
-     * @param array $filters
-     * @param int|null $tenantId
-     * @return int
-     */
-    public function count($filters = [], $tenantId = null) {
-        if ($tenantId === null) {
-            return parent::count($filters, null);
-        }
-
-        $sql = "SELECT COUNT(*) as total FROM {$this->table} wl
-                JOIN webhooks w ON wl.webhook_id = w.id
-                WHERE w.tenant_id = ?";
-        $params = [$tenantId];
-
-        foreach ($filters as $key => $value) {
-            if ($value !== null && $this->isValidColumn($key)) {
-                $sql .= " AND wl.{$key} = ?";
-                $params[] = $value;
-            }
-        }
-
-        $stmt = $this->query($sql, $params);
-        $result = $stmt->fetch();
-        return (int) $result['total'];
+    /** Failed deliveries that still have retries left (all tenants, used by cron). */
+    public function getRetryable($limit = 50) {
+        $sql = "SELECT l.*, w.url, w.secret, w.retry_attempts, w.tenant_id, w.status AS webhook_status
+                FROM {$this->table} l
+                JOIN webhooks w ON w.id = l.webhook_id
+                WHERE l.status = 'failed' AND l.retried = 0 AND l.attempt < w.retry_attempts AND w.status = 'active'
+                ORDER BY l.id ASC " . $this->limitClause($limit);
+        return $this->query($sql)->fetchAll();
     }
 
-    /**
-     * Override update to enforce tenant isolation via webhook
-     *
-     * @param int $id
-     * @param array $data
-     * @param int|null $tenantId
-     * @return bool
-     */
-    public function update($id, $data, $tenantId = null) {
-        if ($tenantId === null) {
-            return parent::update($id, $data, null);
-        }
-
-        $data['updated_at'] = date('Y-m-d H:i:s');
-
-        $sets = [];
-        $params = [];
-
-        foreach ($data as $key => $value) {
-            $sets[] = "wl.{$key} = ?";
-            $params[] = $value;
-        }
-
-        // Verify webhook belongs to tenant before updating
-        $sql = "UPDATE {$this->table} wl
-                JOIN webhooks w ON wl.webhook_id = w.id
-                SET " . implode(', ', $sets) . "
-                WHERE wl.id = ? AND w.tenant_id = ?";
-        $params[] = $id;
-        $params[] = $tenantId;
-
-        $stmt = $this->query($sql, $params);
-        return $stmt->rowCount() > 0;
-    }
-
-    /**
-     * Override delete to enforce tenant isolation via webhook
-     *
-     * @param int $id
-     * @param int|null $tenantId
-     * @return bool
-     */
-    public function delete($id, $tenantId = null) {
-        if ($tenantId === null) {
-            return parent::delete($id, null);
-        }
-
-        $sql = "DELETE wl FROM {$this->table} wl
-                JOIN webhooks w ON wl.webhook_id = w.id
-                WHERE wl.id = ? AND w.tenant_id = ?";
-        $stmt = $this->query($sql, [$id, $tenantId]);
-        return $stmt->rowCount() > 0;
-    }
-
-    /**
-     * Check if table has tenant_id column
-     *
-     * @return bool
-     */
-    protected function hasTenantId() {
-        return false; // WebhookLog doesn't have tenant_id but enforces via JOIN
+    public function markRetried($id) {
+        $this->query("UPDATE {$this->table} SET retried = 1 WHERE id = ?", [$id]);
     }
 }

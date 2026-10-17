@@ -2,74 +2,58 @@
 // FILE: /app/models/Bot.php
 
 /**
- * Bot Model
- *
- * Handles bot configuration data.
+ * Bot Model - bot configuration (channel, language, AI settings).
  */
 class Bot extends Model {
 
     protected $table = 'bots';
+    protected $searchable = ['name', 'description'];
 
-    /**
-     * Get bots by tenant with channel info
-     *
-     * @param int $tenantId
-     * @param int $limit
-     * @param int $offset
-     * @return array
-     */
-    public function getByTenantWithChannel($tenantId, $limit = 100, $offset = 0) {
-        $sql = "SELECT b.*, c.name as channel_name, c.phone_number
+    public function listWithChannel($tenantId, $filters, $search, $limit, $offset) {
+        list($where, $params) = $this->buildWhere($filters, $tenantId, $search, 'b');
+        $sql = "SELECT b.*, c.name AS channel_name, c.phone_number,
+                       (SELECT COUNT(*) FROM flows f WHERE f.bot_id = b.id) AS flow_count
                 FROM {$this->table} b
                 JOIN channels c ON b.channel_id = c.id
-                WHERE b.tenant_id = ?
-                ORDER BY b.id DESC
-                LIMIT ? OFFSET ?";
-        $stmt = $this->query($sql, [$tenantId, $limit, $offset]);
-        return $stmt->fetchAll();
+                WHERE {$where}
+                ORDER BY b.id DESC " . $this->limitClause($limit, $offset);
+        return $this->query($sql, $params)->fetchAll();
     }
 
-    /**
-     * Get bot with full details
-     *
-     * @param int $id
-     * @param int $tenantId
-     * @return array|null
-     */
+    public function getForSelect($tenantId) {
+        return $this->query(
+            "SELECT id, name, channel_id, status FROM {$this->table} WHERE tenant_id = ? ORDER BY name",
+            [$tenantId]
+        )->fetchAll();
+    }
+
     public function getWithDetails($id, $tenantId) {
-        $sql = "SELECT b.*, c.name as channel_name, c.phone_number,
-                       COUNT(DISTINCT f.id) as flow_count,
-                       COUNT(DISTINCT kb.id) as knowledge_base_count
+        $sql = "SELECT b.*, c.name AS channel_name, c.phone_number,
+                       (SELECT COUNT(*) FROM flows f WHERE f.bot_id = b.id AND f.status = 'active') AS flow_count,
+                       (SELECT COUNT(*) FROM knowledge_base kb WHERE kb.tenant_id = b.tenant_id
+                            AND kb.status = 'active' AND (kb.bot_id = b.id OR kb.bot_id IS NULL)) AS knowledge_base_count,
+                       (SELECT COUNT(*) FROM conversations cv WHERE cv.bot_id = b.id) AS conversation_count
                 FROM {$this->table} b
                 JOIN channels c ON b.channel_id = c.id
-                LEFT JOIN flows f ON b.id = f.bot_id AND f.status = 'active'
-                LEFT JOIN knowledge_base kb ON b.id = kb.bot_id AND kb.status = 'active'
                 WHERE b.id = ? AND b.tenant_id = ?
-                GROUP BY b.id
                 LIMIT 1";
-        $stmt = $this->query($sql, [$id, $tenantId]);
+        return $this->query($sql, [$id, $tenantId])->fetch() ?: null;
+    }
+
+    /** The active bot answering a channel (lowest ID wins if several). */
+    public function findActiveForChannel($channelId) {
+        $stmt = $this->query(
+            "SELECT * FROM {$this->table} WHERE channel_id = ? AND status = 'active' ORDER BY id ASC LIMIT 1",
+            [$channelId]
+        );
         return $stmt->fetch() ?: null;
     }
 
-    /**
-     * Toggle bot status (atomic operation to prevent race conditions)
-     *
-     * @param int $id
-     * @param int $tenantId
-     * @return bool
-     */
+    /** Atomic active <-> paused toggle (drafts become active). */
     public function toggleStatus($id, $tenantId) {
-        // Atomic toggle using CASE statement to prevent race conditions
         $sql = "UPDATE {$this->table}
-                SET status = CASE
-                    WHEN status = 'active' THEN 'paused'
-                    WHEN status = 'paused' THEN 'active'
-                    ELSE status
-                END,
-                updated_at = NOW()
+                SET status = CASE WHEN status = 'active' THEN 'paused' ELSE 'active' END, updated_at = ?
                 WHERE id = ? AND tenant_id = ?";
-
-        $stmt = $this->query($sql, [$id, $tenantId]);
-        return $stmt->rowCount() > 0;
+        return $this->query($sql, [date('Y-m-d H:i:s'), $id, $tenantId])->rowCount() > 0;
     }
 }

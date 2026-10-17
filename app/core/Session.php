@@ -12,8 +12,18 @@ class Session {
      * Start session if not already started
      */
     public function __construct() {
-        if (session_status() === PHP_SESSION_NONE) {
+        if (session_status() === PHP_SESSION_NONE && PHP_SAPI !== 'cli') {
+            $secure = !empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off';
+            session_name('ai_whatsapp_session');
+            ini_set('session.use_strict_mode', '1');
+            ini_set('session.use_only_cookies', '1');
+            ini_set('session.cookie_httponly', '1');
+            ini_set('session.cookie_samesite', 'Lax');
+            ini_set('session.cookie_secure', $secure ? '1' : '0');
             session_start();
+        }
+        if (!isset($_SESSION)) {
+            $_SESSION = [];
         }
     }
 
@@ -106,6 +116,8 @@ class Session {
      * Regenerate session ID (prevents session fixation)
      */
     public function regenerate() {
-        session_regenerate_id(true);
+        if (session_status() === PHP_SESSION_ACTIVE) {
+            session_regenerate_id(true);
+        }
     }
 }

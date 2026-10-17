@@ -2,232 +2,281 @@
 // FILE: /app/controllers/ApiController.php
 
 /**
- * API Controller
+ * Public API (JSON).
  *
- * Handles public API endpoints for sending messages and receiving webhooks.
+ *   POST /api/v1/send-message        X-API-KEY  trigger a bot conversation / send a message
+ *   GET  /api/v1/bots                X-API-KEY  list bots
+ *   GET  /api/v1/conversations/{id}  X-API-KEY  conversation + messages
+ *   GET  /api/v1/webhook             provider verification (hub.challenge)
+ *   POST /api/v1/webhook             X-Webhook-Token  simulated incoming WhatsApp message
+ *
+ * Errors: {"error": "message", "details": {...}} with a matching HTTP status.
  */
 class ApiController extends Controller {
 
+    const MAX_MESSAGE_LENGTH = 4096;
+
     /**
-     * Send message via API
-     *
      * POST /api/v1/send-message
+     *
+     * Body: {"bot_id": 1, "phone_number": "+15551234567", "message": "Hi",
+     *        "contact_name": "Jane", "metadata": {...}, "direction": "inbound"|"outbound"}
+     *
+     * direction "inbound" (default): the message is treated as written by the
+     * contact and the bot replies. "outbound": the business sends the message
+     * to the contact (no bot processing).
      */
     public function sendMessage() {
-        // Get API key from header
-        $apiKey = $this->getApiKeyFromHeader();
+        $key = $this->authenticateKey();
+        $tenantId = (int) $key['tenant_id'];
+        $data = $this->jsonBody();
 
-        if (!$apiKey) {
-            $this->json(['error' => 'Missing API key'], 401);
+        $errors = [];
+        $botId = isset($data['bot_id']) ? $data['bot_id'] : null;
+        $phone = isset($data['phone_number']) && is_string($data['phone_number']) ? Validator::normalizePhone($data['phone_number']) : '';
+        $message = isset($data['message']) && is_string($data['message']) ? trim($data['message']) : '';
+        $direction = isset($data['direction']) ? $data['direction'] : 'inbound';
+        $contactName = isset($data['contact_name']) && is_string($data['contact_name']) ? mb_substr(trim($data['contact_name']), 0, 255, 'UTF-8') : null;
+        $metadata = isset($data['metadata']) ? $data['metadata'] : null;
+
+        if (filter_var($botId, FILTER_VALIDATE_INT) === false) {
+            $errors['bot_id'] = 'bot_id is required and must be an integer';
+        }
+        if (!Validator::isValidPhone($phone)) {
+            $errors['phone_number'] = 'phone_number is required in E.164 format, e.g. +15551234567';
+        }
+        if ($message === '' || mb_strlen($message, 'UTF-8') > self::MAX_MESSAGE_LENGTH) {
+            $errors['message'] = 'message is required (1-' . self::MAX_MESSAGE_LENGTH . ' characters)';
+        }
+        if (!in_array($direction, ['inbound', 'outbound'], true)) {
+            $errors['direction'] = 'direction must be "inbound" or "outbound"';
+        }
+        if ($metadata !== null && !is_array($metadata)) {
+            $errors['metadata'] = 'metadata must be a JSON object';
+        }
+        if (!empty($errors)) {
+            $this->json(['error' => 'Validation failed', 'details' => $errors], 422);
         }
 
-        // Validate API key
-        require_once __DIR__ . '/../models/ApiKey.php';
-        $apiKeyModel = new ApiKey();
-        $keyData = $apiKeyModel->validateKey($apiKey);
-
-        if (!$keyData) {
-            $this->json(['error' => 'Invalid API key'], 401);
-        }
-
-        $tenantId = $keyData['tenant_id'];
-
-        // Get request data
-        $data = $this->request->json();
-
-        if (!$data) {
-            $this->json(['error' => 'Invalid JSON payload'], 400);
-        }
-
-        // Validate required fields
-        if (empty($data['bot_id']) || empty($data['phone_number']) || empty($data['message'])) {
-            $this->json(['error' => 'Missing required fields: bot_id, phone_number, message'], 400);
-        }
-
-        // Verify bot belongs to tenant
-        require_once __DIR__ . '/../models/Bot.php';
-        $botModel = new Bot();
-        $bot = $botModel->find($data['bot_id'], $tenantId);
-
+        $bot = (new Bot())->find((int) $botId, $tenantId);
         if (!$bot) {
             $this->json(['error' => 'Bot not found'], 404);
         }
-
-        // Find or create contact
-        require_once __DIR__ . '/../models/Contact.php';
-        $contactModel = new Contact();
-        $contact = $contactModel->findOrCreate($data['phone_number'], $tenantId, [
-            'name' => isset($data['contact_name']) ? $data['contact_name'] : null
-        ]);
-
-        // Find or create conversation
-        require_once __DIR__ . '/../models/Conversation.php';
-        $conversationModel = new Conversation();
-        $conversation = $conversationModel->findOrCreate(
-            $contact['id'],
-            $bot['channel_id'],
-            $tenantId,
-            $bot['id']
-        );
-
-        // Create inbound message
-        require_once __DIR__ . '/../models/Message.php';
-        $messageModel = new Message();
-        $messageModel->createMessage([
-            'tenant_id' => $tenantId,
-            'conversation_id' => $conversation['id'],
-            'direction' => 'inbound',
-            'type' => 'text',
-            'content' => $data['message'],
-            'triggered_by' => 'api',
-            'status' => 'delivered'
-        ]);
-
-        // Process through bot engine
-        require_once __DIR__ . '/../core/BotEngine.php';
-        $botEngine = new BotEngine($tenantId, $bot['id']);
-        $replies = $botEngine->processMessage($data['message'], $conversation['id']);
-
-        // Create outbound messages
-        $responseMessages = [];
-        foreach ($replies as $reply) {
-            $messageId = $messageModel->createMessage([
-                'tenant_id' => $tenantId,
-                'conversation_id' => $conversation['id'],
-                'direction' => 'outbound',
-                'type' => $reply['type'],
-                'content' => $reply['content'],
-                'media_url' => isset($reply['media_url']) ? $reply['media_url'] : null,
-                'triggered_by' => $reply['triggered_by'],
-                'flow_id' => isset($reply['flow_id']) ? $reply['flow_id'] : null,
-                'status' => 'sent'
-            ]);
-
-            $responseMessages[] = [
-                'id' => $messageId,
-                'type' => $reply['type'],
-                'content' => $reply['content']
-            ];
+        $channel = (new Channel())->find($bot['channel_id'], $tenantId);
+        if (!$channel || $channel['status'] !== 'active') {
+            $this->json(['error' => 'The bot\'s WhatsApp channel is inactive'], 409);
         }
 
-        // Return response
+        if ($direction === 'outbound') {
+            $this->sendOutbound($tenantId, $bot, $phone, $message, $contactName, $metadata);
+        }
+
+        $result = (new MessageProcessor($tenantId))->handleInbound($channel, $bot, $phone, $message, [
+            'contact_name' => $contactName,
+            'metadata' => $metadata,
+            'source' => 'api'
+        ]);
+        if (!$result['ok']) {
+            $this->json(['error' => $result['error']], $result['status']);
+        }
+
         $this->json([
             'success' => true,
-            'conversation_id' => $conversation['id'],
-            'contact_id' => $contact['id'],
-            'messages' => $responseMessages
+            'conversation_id' => (int) $result['conversation']['id'],
+            'conversation_created' => $result['conversation_created'],
+            'contact_id' => (int) $result['contact']['id'],
+            'inbound_message_id' => (int) $result['inbound_message_id'],
+            'bot_status' => $bot['status'],
+            'handed_off_to_agent' => $result['handed_off'],
+            'messages' => $result['replies']
         ], 200);
     }
 
-    /**
-     * Receive webhook (simulate WhatsApp incoming messages)
-     *
-     * POST /api/v1/webhook
-     */
-    public function webhook() {
-        // Get request data
-        $data = $this->request->json();
-
-        if (!$data) {
-            $this->json(['error' => 'Invalid JSON payload'], 400);
-        }
-
-        // Require webhook token for authentication
-        $token = isset($_SERVER['HTTP_X_WEBHOOK_TOKEN']) ? $_SERVER['HTTP_X_WEBHOOK_TOKEN'] : null;
-
-        if (!$token) {
-            $this->json(['error' => 'Missing webhook token'], 401);
-        }
-
-        // Find channel by phone number and verify token
-        if (empty($data['to_phone']) || empty($data['from_phone']) || empty($data['message'])) {
-            $this->json(['error' => 'Missing required fields'], 400);
-        }
-
-        require_once __DIR__ . '/../models/Channel.php';
-        $channelModel = new Channel();
-
-        // Find channel by phone number and verify token
-        $db = Database::getInstance()->getConnection();
-        $sql = "SELECT c.*, b.id as bot_id, b.tenant_id
-                FROM channels c
-                LEFT JOIN bots b ON c.id = b.channel_id AND b.status = 'active'
-                WHERE c.phone_number = ? AND c.webhook_verify_token = ? AND c.status = 'active'
-                LIMIT 1";
-        $stmt = $db->prepare($sql);
-        $stmt->execute([$data['to_phone'], $token]);
-        $channel = $stmt->fetch();
-
-        if (!$channel || !$channel['bot_id']) {
-            $this->json(['error' => 'Invalid webhook token or channel not found'], 401);
-        }
-
-        $tenantId = $channel['tenant_id'];
-        $botId = $channel['bot_id'];
-
-        // Process same as send-message API
-        require_once __DIR__ . '/../models/Contact.php';
-        require_once __DIR__ . '/../models/Conversation.php';
-        require_once __DIR__ . '/../models/Message.php';
-
+    private function sendOutbound($tenantId, $bot, $phone, $message, $contactName, $metadata) {
         $contactModel = new Contact();
-        $conversationModel = new Conversation();
-        $messageModel = new Message();
+        if (!$contactModel->findByPhoneNumber($phone, $tenantId)) {
+            $quota = QuotaService::check($tenantId, 'contacts');
+            if (!$quota['allowed']) {
+                $this->json(['error' => $quota['message']], 429);
+            }
+        }
+        list($contact) = $contactModel->findOrCreate($phone, $tenantId, ['name' => $contactName]);
+        if ($contact['status'] !== 'active') {
+            $this->json(['error' => 'Contact is ' . $contact['status'] . ' and cannot receive messages'], 409);
+        }
+        list($conversation) = (new Conversation())->findOrCreate($contact['id'], $bot['channel_id'], $tenantId, $bot['id']);
 
-        $contact = $contactModel->findOrCreate($data['from_phone'], $tenantId);
-        $conversation = $conversationModel->findOrCreate($contact['id'], $channel['id'], $tenantId, $botId);
-
-        $messageModel->createMessage([
-            'tenant_id' => $tenantId,
-            'conversation_id' => $conversation['id'],
-            'direction' => 'inbound',
+        $sent = (new MessageProcessor($tenantId))->sendOutbound($conversation, [
             'type' => 'text',
-            'content' => $data['message'],
-            'status' => 'delivered'
+            'content' => $message,
+            'triggered_by' => 'api',
+            'metadata' => $metadata ? ['external' => $metadata] : null
         ]);
-
-        // Process through bot engine
-        require_once __DIR__ . '/../core/BotEngine.php';
-        $botEngine = new BotEngine($tenantId, $botId);
-        $replies = $botEngine->processMessage($data['message'], $conversation['id']);
-
-        // Create outbound messages
-        foreach ($replies as $reply) {
-            $messageModel->createMessage([
-                'tenant_id' => $tenantId,
-                'conversation_id' => $conversation['id'],
-                'direction' => 'outbound',
-                'type' => $reply['type'],
-                'content' => $reply['content'],
-                'triggered_by' => $reply['triggered_by'],
-                'flow_id' => isset($reply['flow_id']) ? $reply['flow_id'] : null,
-                'status' => 'sent'
-            ]);
+        if ($sent === false) {
+            $this->json(['error' => QuotaService::check($tenantId, 'messages')['message']], 429);
         }
 
-        $this->json(['success' => true], 200);
+        $this->json([
+            'success' => true,
+            'conversation_id' => (int) $conversation['id'],
+            'contact_id' => (int) $contact['id'],
+            'messages' => [$sent]
+        ], 201);
+    }
+
+    /** GET /api/v1/bots */
+    public function listBots() {
+        $key = $this->authenticateKey();
+        $bots = (new Bot())->listWithChannel((int) $key['tenant_id'], [], null, 100, 0);
+        $this->json(['data' => array_map(function ($b) {
+            return [
+                'id' => (int) $b['id'],
+                'name' => $b['name'],
+                'status' => $b['status'],
+                'channel' => ['id' => (int) $b['channel_id'], 'name' => $b['channel_name'], 'phone_number' => $b['phone_number']],
+                'ai_enabled' => (bool) $b['ai_enabled']
+            ];
+        }, $bots)]);
+    }
+
+    /** GET /api/v1/conversations/{id} */
+    public function getConversation($id) {
+        $key = $this->authenticateKey();
+        $tenantId = (int) $key['tenant_id'];
+        $conversation = (new Conversation())->getWithDetails((int) $id, $tenantId);
+        if (!$conversation) {
+            $this->json(['error' => 'Conversation not found'], 404);
+        }
+        $messages = (new Message())->getByConversation($conversation['id'], $tenantId, 200);
+        $this->json([
+            'id' => (int) $conversation['id'],
+            'status' => $conversation['status'],
+            'bot_id' => $conversation['bot_id'] !== null ? (int) $conversation['bot_id'] : null,
+            'contact' => ['phone_number' => $conversation['phone_number'], 'name' => $conversation['contact_name']],
+            'variables' => (new ConversationVariable())->getAllVariables($conversation['id'], false),
+            'messages' => array_map(function ($m) {
+                return [
+                    'id' => (int) $m['id'],
+                    'direction' => $m['direction'],
+                    'type' => $m['type'],
+                    'content' => $m['content'],
+                    'media_url' => $m['media_url'],
+                    'triggered_by' => $m['triggered_by'],
+                    'created_at' => $m['created_at'] . 'Z'
+                ];
+            }, $messages)
+        ]);
     }
 
     /**
-     * Get API key from header
-     *
-     * @return string|null
+     * GET /api/v1/webhook?hub_mode=subscribe&hub_verify_token=TOKEN&hub_challenge=123
+     * (PHP converts "hub.mode" to "hub_mode".) Echoes the challenge when the token is known.
      */
-    private function getApiKeyFromHeader() {
-        $headers = getallheaders();
+    public function verifyWebhook() {
+        $mode = $this->request->get('hub_mode');
+        $token = (string) $this->request->get('hub_verify_token', '');
+        $challenge = (string) $this->request->get('hub_challenge', '');
 
-        if (isset($headers['X-API-Key'])) {
-            return $headers['X-API-Key'];
+        if ($mode === 'subscribe' && $token !== '' && (new Channel())->findByVerifyToken($token)) {
+            header('Content-Type: text/plain');
+            echo preg_replace('/[^A-Za-z0-9_\-]/', '', $challenge);
+            exit;
+        }
+        $this->json(['error' => 'Verification failed'], 403);
+    }
+
+    /**
+     * POST /api/v1/webhook  (simulated WhatsApp provider callback)
+     *
+     * Header: X-Webhook-Token: <channel verify token>
+     * Body:   {"to_phone": "+15551234567", "from_phone": "+15557001001",
+     *          "message": "Hello", "contact_name": "Alice", "message_id": "wamid.123"}
+     */
+    public function webhook() {
+        $data = $this->jsonBody();
+        $token = isset($_SERVER['HTTP_X_WEBHOOK_TOKEN']) ? (string) $_SERVER['HTTP_X_WEBHOOK_TOKEN'] : '';
+        if ($token === '') {
+            $this->json(['error' => 'Missing X-Webhook-Token header'], 401);
         }
 
-        if (isset($headers['X-Api-Key'])) {
-            return $headers['X-Api-Key'];
+        $to = isset($data['to_phone']) && is_string($data['to_phone']) ? Validator::normalizePhone($data['to_phone']) : '';
+        $from = isset($data['from_phone']) && is_string($data['from_phone']) ? Validator::normalizePhone($data['from_phone']) : '';
+        $message = isset($data['message']) && is_string($data['message']) ? trim($data['message']) : '';
+
+        $errors = [];
+        if (!Validator::isValidPhone($to)) {
+            $errors['to_phone'] = 'to_phone must be your channel number in E.164 format';
+        }
+        if (!Validator::isValidPhone($from)) {
+            $errors['from_phone'] = 'from_phone must be in E.164 format';
+        }
+        if ($message === '' || mb_strlen($message, 'UTF-8') > self::MAX_MESSAGE_LENGTH) {
+            $errors['message'] = 'message is required (1-' . self::MAX_MESSAGE_LENGTH . ' characters)';
+        }
+        if (!empty($errors)) {
+            $this->json(['error' => 'Validation failed', 'details' => $errors], 422);
         }
 
-        if (isset($_SERVER['HTTP_X_API_KEY'])) {
-            return $_SERVER['HTTP_X_API_KEY'];
+        $channel = (new Channel())->findActiveByPhone($to);
+        if (!$channel || !hash_equals((string) $channel['webhook_verify_token'], $token)) {
+            // Same response for unknown channel and wrong token (no enumeration).
+            $this->json(['error' => 'Invalid webhook token or channel'], 401);
         }
 
-        return null;
+        $tenantId = (int) $channel['tenant_id'];
+        $tenant = (new Tenant())->find($tenantId);
+        if (!$tenant || $tenant['status'] !== 'active') {
+            $this->json(['error' => 'Account suspended'], 403);
+        }
+
+        $bot = (new Bot())->findActiveForChannel($channel['id']);
+        $result = (new MessageProcessor($tenantId))->handleInbound($channel, $bot, $from, $message, [
+            'contact_name' => isset($data['contact_name']) && is_string($data['contact_name']) ? mb_substr($data['contact_name'], 0, 255, 'UTF-8') : null,
+            'metadata' => isset($data['message_id']) && is_scalar($data['message_id']) ? ['provider_message_id' => (string) $data['message_id']] : null,
+            'source' => 'webhook'
+        ]);
+        if (!$result['ok']) {
+            $this->json(['error' => $result['error']], $result['status']);
+        }
+
+        $this->json([
+            'success' => true,
+            'conversation_id' => (int) $result['conversation']['id'],
+            'bot_id' => $bot ? (int) $bot['id'] : null,
+            'messages' => $result['replies']
+        ], 200);
+    }
+
+    /** Require a valid X-API-KEY (or "Authorization: Bearer <key>"). */
+    private function authenticateKey() {
+        $raw = isset($_SERVER['HTTP_X_API_KEY']) ? $_SERVER['HTTP_X_API_KEY'] : null;
+        if (!$raw && isset($_SERVER['HTTP_AUTHORIZATION']) && preg_match('/^Bearer\s+(\S+)$/i', $_SERVER['HTTP_AUTHORIZATION'], $m)) {
+            $raw = $m[1];
+        }
+        if (!$raw) {
+            $this->json(['error' => 'Missing API key. Send it in the X-API-KEY header.'], 401);
+        }
+        $key = (new ApiKey())->validateKey($raw);
+        if (!$key) {
+            $this->json(['error' => 'Invalid or revoked API key'], 401);
+        }
+        return $key;
+    }
+
+    /** Parse a JSON object body (POST + application/json only). */
+    private function jsonBody() {
+        if (!$this->request->isPost()) {
+            $this->json(['error' => 'Method not allowed'], 405);
+        }
+        $type = isset($_SERVER['CONTENT_TYPE']) ? strtolower($_SERVER['CONTENT_TYPE']) : '';
+        if (strpos($type, 'application/json') !== 0) {
+            $this->json(['error' => 'Content-Type must be application/json'], 415);
+        }
+        $raw = file_get_contents('php://input', false, null, 0, 1048576);
+        $data = json_decode((string) $raw, true);
+        if (!is_array($data) || (!empty($data) && array_values($data) === $data)) {
+            $this->json(['error' => 'Request body must be a JSON object'], 400);
+        }
+        return $data;
     }
 }

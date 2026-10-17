@@ -2,91 +2,133 @@
 // FILE: /app/models/Contact.php
 
 /**
- * Contact Model
- *
- * Handles contact data.
+ * Contact Model - phone number is unique per tenant.
  */
 class Contact extends Model {
 
     protected $table = 'contacts';
+    protected $searchable = ['name', 'phone_number', 'email'];
 
     /**
-     * Find or create contact by phone number
+     * Find a contact by phone or create it.
      *
-     * @param string $phoneNumber
-     * @param int $tenantId
-     * @param array $additionalData
-     * @return array
+     * @return array [array $contact, bool $created]
      */
     public function findOrCreate($phoneNumber, $tenantId, $additionalData = []) {
         $contact = $this->findByPhoneNumber($phoneNumber, $tenantId);
+        $now = date('Y-m-d H:i:s');
 
         if ($contact) {
-            // Update last contact time
-            $this->update($contact['id'], ['last_contact_at' => date('Y-m-d H:i:s')], $tenantId);
-            // Return fresh data after update
-            return $this->find($contact['id'], $tenantId);
+            $updates = ['last_contact_at' => $now];
+            if (empty($contact['name']) && !empty($additionalData['name'])) {
+                $updates['name'] = $additionalData['name'];
+            }
+            $this->update($contact['id'], $updates, $tenantId);
+            return [array_merge($contact, $updates), false];
         }
 
-        // Create new contact
-        $data = array_merge([
+        // Defaults first; caller data (e.g. name, status) may override them.
+        $data = array_merge(['status' => 'active'], array_filter($additionalData, function ($v) {
+            return $v !== null && $v !== '';
+        }), [
             'tenant_id' => $tenantId,
             'phone_number' => $phoneNumber,
-            'last_contact_at' => date('Y-m-d H:i:s')
-        ], $additionalData);
+            'last_contact_at' => $now
+        ]);
 
-        $contactId = $this->create($data);
-        return $this->find($contactId, $tenantId);
+        try {
+            $id = $this->create($data);
+        } catch (PDOException $e) {
+            // Unique (tenant, phone) race: another request created it first.
+            if ($e->getCode() === '23000') {
+                return [$this->findByPhoneNumber($phoneNumber, $tenantId), false];
+            }
+            throw $e;
+        }
+
+        return [$this->find($id, $tenantId), true];
     }
 
-    /**
-     * Find contact by phone number
-     *
-     * @param string $phoneNumber
-     * @param int $tenantId
-     * @return array|null
-     */
     public function findByPhoneNumber($phoneNumber, $tenantId) {
-        $sql = "SELECT * FROM {$this->table} WHERE phone_number = ? AND tenant_id = ? LIMIT 1";
-        $stmt = $this->query($sql, [$phoneNumber, $tenantId]);
+        $stmt = $this->query(
+            "SELECT * FROM {$this->table} WHERE phone_number = ? AND tenant_id = ? LIMIT 1",
+            [$phoneNumber, $tenantId]
+        );
         return $stmt->fetch() ?: null;
     }
 
     /**
-     * Get contacts with tags
-     *
-     * @param int $tenantId
-     * @param array $filters
-     * @param int $limit
-     * @param int $offset
-     * @return array
+     * List contacts with tag names; supports status, tag and search filters.
      */
-    public function getWithTags($tenantId, $filters = [], $limit = 100, $offset = 0) {
-        $sql = "SELECT c.*, GROUP_CONCAT(t.name) as tags
+    public function listWithTags($tenantId, $filters, $search, $limit, $offset) {
+        list($where, $params) = $this->buildListWhere($tenantId, $filters, $search);
+        $sql = "SELECT c.*,
+                       (SELECT GROUP_CONCAT(t.name ORDER BY t.name SEPARATOR ', ')
+                          FROM contact_tags ct JOIN tags t ON t.id = ct.tag_id
+                         WHERE ct.contact_id = c.id) AS tags
                 FROM {$this->table} c
-                LEFT JOIN contact_tags ct ON c.id = ct.contact_id
-                LEFT JOIN tags t ON ct.tag_id = t.id
-                WHERE c.tenant_id = ?";
+                WHERE {$where}
+                ORDER BY c.id DESC " . $this->limitClause($limit, $offset);
+        return $this->query($sql, $params)->fetchAll();
+    }
+
+    public function countWithTags($tenantId, $filters, $search) {
+        list($where, $params) = $this->buildListWhere($tenantId, $filters, $search);
+        return (int) $this->query("SELECT COUNT(*) AS total FROM {$this->table} c WHERE {$where}", $params)->fetch()['total'];
+    }
+
+    private function buildListWhere($tenantId, $filters, $search) {
+        $tagId = isset($filters['tag_id']) ? (int) $filters['tag_id'] : 0;
+        unset($filters['tag_id']);
+
+        list($where, $params) = $this->buildWhere($filters, $tenantId, $search, 'c');
+        if ($tagId > 0) {
+            $where .= " AND EXISTS (SELECT 1 FROM contact_tags ct WHERE ct.contact_id = c.id AND ct.tag_id = ?)";
+            $params[] = $tagId;
+        }
+        return [$where, $params];
+    }
+
+    /**
+     * Contacts matching a broadcast segment.
+     * $filter: {"type":"all"} | {"type":"tag","tag_id":N} | {"type":"custom","field":"x","value":"y"}
+     * Unsubscribed and blocked contacts are always excluded.
+     */
+    public function getSegment($tenantId, $filter) {
+        $sql = "SELECT c.* FROM {$this->table} c WHERE c.tenant_id = ? AND c.status = 'active'";
         $params = [$tenantId];
+        $type = isset($filter['type']) ? $filter['type'] : 'all';
 
-        if (isset($filters['status'])) {
-            $sql .= " AND c.status = ?";
-            $params[] = $filters['status'];
+        if ($type === 'tag' && !empty($filter['tag_id'])) {
+            $sql .= " AND EXISTS (SELECT 1 FROM contact_tags ct WHERE ct.contact_id = c.id AND ct.tag_id = ?)";
+            $params[] = (int) $filter['tag_id'];
         }
 
-        if (isset($filters['search'])) {
-            $sql .= " AND (c.name LIKE ? OR c.phone_number LIKE ? OR c.email LIKE ?)";
-            $searchTerm = '%' . $filters['search'] . '%';
-            $params[] = $searchTerm;
-            $params[] = $searchTerm;
-            $params[] = $searchTerm;
+        $contacts = $this->query($sql . ' ORDER BY c.id', $params)->fetchAll();
+
+        if ($type === 'custom' && !empty($filter['field'])) {
+            $field = $filter['field'];
+            $value = isset($filter['value']) ? Flow::normalize($filter['value']) : '';
+            $contacts = array_values(array_filter($contacts, function ($c) use ($field, $value) {
+                $custom = json_array($c['custom_fields']);
+                if (in_array($field, ['name', 'email', 'phone_number'], true)) {
+                    return Flow::normalize($c[$field]) === $value;
+                }
+                return isset($custom[$field]) && Flow::normalize($custom[$field]) === $value;
+            }));
         }
 
-        $sql .= " GROUP BY c.id ORDER BY c.id DESC LIMIT ? OFFSET ?";
-        $params[] = $limit;
-        $params[] = $offset;
+        return $contacts;
+    }
 
-        $stmt = $this->query($sql, $params);
-        return $stmt->fetchAll();
+    /** Count of segment members including unsubscribed (for the "excluded" stat). */
+    public function countSegmentAll($tenantId, $filter) {
+        $sql = "SELECT COUNT(*) AS c FROM {$this->table} c WHERE c.tenant_id = ?";
+        $params = [$tenantId];
+        if (isset($filter['type']) && $filter['type'] === 'tag' && !empty($filter['tag_id'])) {
+            $sql .= " AND EXISTS (SELECT 1 FROM contact_tags ct WHERE ct.contact_id = c.id AND ct.tag_id = ?)";
+            $params[] = (int) $filter['tag_id'];
+        }
+        return (int) $this->query($sql, $params)->fetch()['c'];
     }
 }

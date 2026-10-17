@@ -2,41 +2,35 @@
 // FILE: /app/controllers/InboxController.php
 
 /**
- * Inbox Controller
- *
- * Handles agent inbox for managing conversations.
+ * Inbox Controller - conversation list for agents.
+ * Agents see "My conversations" + unassigned ones by default.
  */
 class InboxController extends Controller {
 
-    /**
-     * Show inbox
-     */
     public function index() {
-        $this->requireAuth();
+        $tenantId = $this->requireTenant(self::TENANT_ROLES);
+        $model = new Conversation();
 
-        $tenantId = $this->getTenantId();
-        $page = max(1, (int) $this->request->get('page', 1));
-        $perPage = 20;
-
+        $status = $this->request->get('status', 'open');
         $filters = [
-            'status' => $this->request->get('status')
+            'status' => in_array($status, Conversation::STATUSES, true) ? $status : null,
+            'assigned_to' => $this->request->get('assigned_to', ''),
+            'channel_id' => (int) $this->request->get('channel_id') ?: null,
+            'search' => $this->request->get('search')
         ];
+        if ($filters['assigned_to'] === 'me') {
+            $filters['assigned_to'] = (string) $this->auth->id();
+        }
 
-        // Remove null filters
-        $filters = array_filter($filters, function($v) { return $v !== null; });
-
-        require_once __DIR__ . '/../models/Conversation.php';
-        $conversationModel = new Conversation();
-
-        $total = $conversationModel->count($filters, $tenantId);
-        $pagination = $this->getPagination($total, $perPage);
-        $conversations = $conversationModel->getForInbox($tenantId, $filters, $perPage, $pagination['offset']);
-
+        $pagination = $this->getPagination($model->countForInbox($tenantId, $filters));
         $this->view('inbox/index', [
             'title' => 'Inbox',
-            'conversations' => $conversations,
+            'conversations' => $model->getForInbox($tenantId, $filters, $pagination['per_page'], $pagination['offset']),
             'pagination' => $pagination,
-            'filters' => $filters
+            'filters' => ['status' => $status] + $filters,
+            'counts' => $model->countByStatus($tenantId),
+            'agents' => (new User())->getAssignable($tenantId),
+            'channels' => (new Channel())->getForSelect($tenantId)
         ]);
     }
 }
